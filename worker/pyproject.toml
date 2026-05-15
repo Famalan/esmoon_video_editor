@@ -1,0 +1,23 @@
+[tool.poetry]
+name = "video-slicer-worker"
+version = "0.1.0"
+description = "Video Slicer Celery worker"
+authors = ["team"]
+packages = [{ include = "worker" }]
+
+[tool.poetry.dependencies]
+python = "^3.12"
+celery = { version = "^5.4", extras = ["redis"] }
+sqlalchemy = "^2.0"
+psycopg = { version = "^3.2", extras = ["binary"] }
+redis = "^5.2"
+pydantic = "^2.9"
+pydantic-settings = "^2.6"
+video-slicer-shared = { path = "../shared", develop = true }
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^8"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
