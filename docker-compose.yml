@@ -71,6 +71,7 @@ services:
     volumes:
       - ./worker:/app
       - ./shared:/shared
+      - whisper_models:/whisper-cache
 
   web:
     build:
@@ -88,3 +89,4 @@ services:
 volumes:
   pg_data:
   minio_data:
+  whisper_models:

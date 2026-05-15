@@ -17,6 +17,7 @@ pydantic-settings = "^2.6"
 celery = { version = "^5.4", extras = ["redis"] }
 redis = "^5.2"
 python-multipart = "^0.0.12"
+boto3 = "^1.35"
 video-slicer-shared = { path = "../shared", develop = true }
 
 [tool.poetry.group.dev.dependencies]

@@ -7,4 +7,5 @@ COPY worker/pyproject.toml /app/
 COPY shared /shared
 RUN poetry install --no-root --no-interaction
 COPY worker /app
-ENV PYTHONPATH=/app:/shared
+ENV PYTHONPATH=/app:/shared \
+    WHISPER_CACHE_DIR=/whisper-cache
