@@ -29,8 +29,9 @@ def upgrade() -> None:
     asset_kind.create(op.get_bind())
     op.add_column(
         "assets",
-        sa.Column("kind", asset_kind, nullable=False),
+        sa.Column("kind", asset_kind, nullable=False, server_default="source_video"),
     )
+    op.alter_column("assets", "kind", server_default=None)
 
     # 2) add Asset.position_idx
     op.add_column(
@@ -59,4 +60,5 @@ def downgrade() -> None:
     op.execute("DROP TYPE asset_kind")
     asset_kind = sa.Enum("source", "transcript", "segment", "thumbnail", name="asset_kind")
     asset_kind.create(op.get_bind())
-    op.add_column("assets", sa.Column("kind", asset_kind, nullable=False))
+    op.add_column("assets", sa.Column("kind", asset_kind, nullable=False, server_default="source"))
+    op.alter_column("assets", "kind", server_default=None)
