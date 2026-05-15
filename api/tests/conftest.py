@@ -7,10 +7,8 @@ from app.celery_client import celery
 from app.db import Base, get_session
 from app.main import app
 
-# Approach B: point at compose postgres/redis directly (testcontainers unavailable
-# inside Docker on this host due to Ryuk/Docker network issues)
 _POSTGRES_URL = (
-    "postgresql+psycopg://videoslicer:videoslicer@postgres:5432/videoslicer"
+    "postgresql+psycopg://videoslicer:videoslicer@postgres:5432/videoslicer_test"
 )
 
 

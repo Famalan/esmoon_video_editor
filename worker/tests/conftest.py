@@ -22,9 +22,14 @@ def _celery_eager():
     yield
 
 
+_TEST_DB_URL = (
+    "postgresql+psycopg://videoslicer:videoslicer@postgres:5432/videoslicer_test"
+)
+
+
 @pytest.fixture(scope="session")
 def engine():
-    eng = create_engine(settings.database_url)
+    eng = create_engine(_TEST_DB_URL)
     Base.metadata.create_all(eng)
     yield eng
     Base.metadata.drop_all(eng)
