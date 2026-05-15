@@ -14,6 +14,7 @@ class Settings(BaseSettings):
     redis_url: str = "redis://redis:6379/0"
 
     minio_endpoint: str
+    minio_public_endpoint: str | None = None
     minio_root_user: str
     minio_root_password: str
     minio_bucket: str
