@@ -18,6 +18,5 @@ app = Celery(
     ],
 )
 
-app.conf.task_default_queue = "default"
 app.conf.task_acks_late = True
 app.conf.worker_prefetch_multiplier = 1
