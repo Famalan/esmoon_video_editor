@@ -4,12 +4,13 @@ import uuid
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, UploadFile
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.celery_client import enqueue_pipeline
 from app.db import get_session
 from app.models import Job, JobStatus, SourceType
-from app.schemas import JobCreate, JobOut
+from app.schemas import JobCreate, JobOut, JobsList
 from shared.stages import Stage
 
 router = APIRouter(prefix="/jobs", tags=["jobs"])
@@ -50,3 +51,17 @@ def create_job_upload(
     if file.content_type and not file.content_type.startswith("video/"):
         raise HTTPException(status_code=415, detail="only video/* accepted")
     return _persist_job(db, SourceType.FILE, None, user)
+
+
+@router.get("", response_model=JobsList)
+def list_jobs(db: Session = Depends(get_session)) -> JobsList:
+    rows = db.execute(select(Job).order_by(Job.created_at.desc())).scalars().all()
+    return JobsList(items=[JobOut.model_validate(j) for j in rows])
+
+
+@router.get("/{job_id}", response_model=JobOut)
+def get_job(job_id: uuid.UUID, db: Session = Depends(get_session)) -> Job:
+    job = db.get(Job, job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="job not found")
+    return job
