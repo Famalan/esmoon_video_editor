@@ -25,9 +25,11 @@ class SourceType(StrEnum):
 
 
 class AssetKind(StrEnum):
-    SOURCE = "source"
+    SOURCE_VIDEO = "source_video"
+    SOURCE_SUBS = "source_subs"
+    SOURCE_AUDIO = "source_audio"
     TRANSCRIPT = "transcript"
-    SEGMENT = "segment"
+    SEGMENT_VIDEO = "segment_video"
     THUMBNAIL = "thumbnail"
 
 
@@ -79,6 +81,7 @@ class Asset(Base):
     segment_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("segments.id", ondelete="CASCADE"), nullable=True
     )
+    position_idx: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     job: Mapped[Job] = relationship(back_populates="assets")
 
@@ -96,6 +99,9 @@ class Segment(Base):
     transcript_excerpt: Mapped[str | None] = mapped_column(Text, nullable=True)
     status: Mapped[SegmentStatus] = mapped_column(Enum(SegmentStatus, name="segment_status", values_callable=lambda obj: [e.value for e in obj]), default=SegmentStatus.PENDING)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    selected_thumbnail_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("assets.id", ondelete="SET NULL"), nullable=True
+    )
 
     job: Mapped[Job] = relationship(back_populates="segments")
     upload: Mapped[Upload | None] = relationship(back_populates="segment", uselist=False, cascade="all, delete-orphan")
