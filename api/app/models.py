@@ -100,7 +100,13 @@ class Segment(Base):
     status: Mapped[SegmentStatus] = mapped_column(Enum(SegmentStatus, name="segment_status", values_callable=lambda obj: [e.value for e in obj]), default=SegmentStatus.PENDING)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     selected_thumbnail_id: Mapped[uuid.UUID | None] = mapped_column(
-        ForeignKey("assets.id", ondelete="SET NULL"), nullable=True
+        ForeignKey(
+            "assets.id",
+            ondelete="SET NULL",
+            use_alter=True,
+            name="segments_selected_thumbnail_id_fkey",
+        ),
+        nullable=True,
     )
 
     job: Mapped[Job] = relationship(back_populates="segments")

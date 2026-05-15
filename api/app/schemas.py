@@ -29,3 +29,41 @@ class JobOut(BaseModel):
 
 class JobsList(BaseModel):
     items: list[JobOut]
+
+
+class ThumbnailOut(BaseModel):
+    asset_id: uuid.UUID
+    position_idx: int
+    url: str
+
+    model_config = {"from_attributes": True}
+
+
+class SegmentOut(BaseModel):
+    id: uuid.UUID
+    job_id: uuid.UUID
+    index: int
+    start_sec: float
+    end_sec: float
+    title: str | None
+    summary: str | None
+    yt_title: str | None
+    yt_description: str | None
+    yt_tags: list[str] | None
+    selected_thumbnail_id: uuid.UUID | None
+    thumbnails: list[ThumbnailOut]
+    video_download_url: str | None
+    status: str
+
+    model_config = {"from_attributes": True}
+
+
+class SegmentsList(BaseModel):
+    items: list[SegmentOut]
+
+
+class SegmentPatch(BaseModel):
+    yt_title: str | None = None
+    yt_description: str | None = None
+    yt_tags: list[str] | None = None
+    selected_thumbnail_id: uuid.UUID | None = None
