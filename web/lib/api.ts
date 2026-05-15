@@ -53,3 +53,53 @@ export async function createJobFromFile(file: File, user: string): Promise<Job> 
   if (!r.ok) throw new Error(`createJobFromFile ${r.status}`);
   return r.json();
 }
+
+export interface Thumbnail {
+  asset_id: string;
+  position_idx: number;
+  url: string;
+}
+
+export interface Segment {
+  id: string;
+  job_id: string;
+  index: number;
+  start_sec: number;
+  end_sec: number;
+  title: string | null;
+  summary: string | null;
+  yt_title: string | null;
+  yt_description: string | null;
+  yt_tags: string[] | null;
+  selected_thumbnail_id: string | null;
+  thumbnails: Thumbnail[];
+  video_download_url: string | null;
+  status: string;
+}
+
+export interface SegmentsList {
+  items: Segment[];
+}
+
+export interface SegmentPatch {
+  yt_title?: string;
+  yt_description?: string;
+  yt_tags?: string[];
+  selected_thumbnail_id?: string;
+}
+
+export async function listSegments(jobId: string): Promise<SegmentsList> {
+  const r = await fetch(`${BASE}/jobs/${jobId}/segments`, { cache: "no-store" });
+  if (!r.ok) throw new Error(`listSegments ${r.status}`);
+  return r.json();
+}
+
+export async function patchSegment(id: string, body: SegmentPatch): Promise<Segment> {
+  const r = await fetch(`${BASE}/segments/${id}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!r.ok) throw new Error(`patchSegment ${r.status}`);
+  return r.json();
+}
