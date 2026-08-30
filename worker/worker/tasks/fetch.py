@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
@@ -18,9 +19,12 @@ def _ytdlp_download(url: str, workdir: Path) -> tuple[Path, Path | None]:
     video_tmpl = str(workdir / "source.%(ext)s")
     vid = subprocess.run(
         [
-            "yt-dlp",
+            sys.executable, "-m", "yt_dlp",
             "-f", "bestvideo[height<=1080]+bestaudio/best",
             "--merge-output-format", "mp4",
+            "--retries", "5",
+            "--fragment-retries", "5",
+            "--retry-sleep", "http:3",
             "-o", video_tmpl,
             "--no-warnings",
             "--quiet",
@@ -42,10 +46,11 @@ def _ytdlp_download(url: str, workdir: Path) -> tuple[Path, Path | None]:
     subs_tmpl = str(workdir / "subs")
     subprocess.run(
         [
-            "yt-dlp",
+            sys.executable, "-m", "yt_dlp",
             "--skip-download",
             "--write-auto-subs",
             "--write-subs",
+            "--retries", "5",
             "--sub-lang", "ru",
             "--sub-format", "vtt",
             "-o", subs_tmpl,
