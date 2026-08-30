@@ -21,9 +21,9 @@ class SegmentValidationError(ValueError):
     pass
 
 
-_MIN_DURATION = 600.0           # 10 min пол для средних сегментов
-_MIN_DURATION_EDGE = 300.0      # 5 min пол для первого/последнего (intro/outro)
-_MAX_DURATION = 2400.0          # 40 min потолок (после auto-merge может вырасти)
+_MIN_DURATION = 420.0           # 7 мин минимум для каждого сегмента
+_MIN_DURATION_EDGE = 420.0      # первый и последний подчиняются тому же правилу
+_MAX_DURATION = 900.0           # 15 мин максимум для каждого сегмента
 _DURATION_OVERSHOOT = 5.0
 _OVERLAP_TOLERANCE = 1.0
 _TAIL_GAP_TOLERANCE = 60.0      # хвост должен быть покрыт до duration−60s
@@ -51,9 +51,9 @@ def auto_merge_short_edges(segments: list[dict]) -> list[dict]:
     LLM любит выделять короткий intro/jingle/outro и иногда middle, который
     короче минимума. Сливаем такие сегменты программно перед валидацией.
 
-    - Первый/последний (edge) сливаем если короче _MIN_DURATION_EDGE.
-    - Средний сливаем если короче _MIN_DURATION; выбираем соседа, после слияния
-      с которым итоговая длина ближе к 900с (target 15 мин).
+    - Первый/последний (edge) сливаем, если он короче 7 минут.
+    - Средний сливаем, если он короче 7 минут; выбираем соседа, после слияния
+      с которым итоговая длина ближе к 660с (цель 11 минут) и не больше 15 минут.
     """
     if len(segments) < 2:
         return segments
@@ -64,14 +64,12 @@ def auto_merge_short_edges(segments: list[dict]) -> list[dict]:
             out[0] = _merge(out[0], out[1])
             out.pop(1)
         else:
-            out.pop(0)  # сосед уже на потолке — отбрасываем короткий intro
             break
     while len(out) >= 2 and _dur(out[-1]) < _MIN_DURATION_EDGE:
         if _dur(out[-2]) + _dur(out[-1]) <= _MAX_DURATION:
             out[-2] = _merge(out[-2], out[-1])
             out.pop()
         else:
-            out.pop()  # сосед уже на потолке — отбрасываем короткий outro
             break
 
     changed = True
@@ -82,9 +80,16 @@ def auto_merge_short_edges(segments: list[dict]) -> list[dict]:
                 continue
             left_after = _dur(out[i - 1]) + _dur(out[i])
             right_after = _dur(out[i]) + _dur(out[i + 1])
-            target = 900.0
-            merge_left = abs(left_after - target) <= abs(right_after - target)
-            if merge_left:
+            target = 660.0
+            candidates = []
+            if left_after <= _MAX_DURATION:
+                candidates.append((abs(left_after - target), "left"))
+            if right_after <= _MAX_DURATION:
+                candidates.append((abs(right_after - target), "right"))
+            if not candidates:
+                continue
+            merge_side = min(candidates)[1]
+            if merge_side == "left":
                 out[i - 1] = _merge(out[i - 1], out[i])
                 out.pop(i)
             else:
@@ -251,7 +256,7 @@ def _llm_segment(cues: list[dict], duration: float, retry_hint: str = "") -> lis
         data = llm.call_json(
             system=prompt.SYSTEM, user=user,
             schema=prompt.JSON_SCHEMA, schema_name="video_segments",
-            model=settings.polza_model_segment,
+            model=settings.codex_model,
         )
         raw.extend(data["segments"])
     return raw

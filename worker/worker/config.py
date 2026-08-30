@@ -1,8 +1,10 @@
+from typing import Literal
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+    model_config = SettingsConfigDict(env_file=(".env", "../.env"), extra="ignore")
 
     postgres_user: str
     postgres_password: str
@@ -17,14 +19,15 @@ class Settings(BaseSettings):
     minio_root_password: str = "minioadmin"
     minio_bucket: str = "video-slicer"
 
-    polza_api_key: str = ""
-    polza_base_url: str = "https://api.polza.ai/api/v1"
-    polza_model: str = "google/gemini-3.5-flash"
-    polza_model_segment: str = "google/gemini-3.5-flash"
-    polza_model_metadata: str = "google/gemini-3.5-flash"
+    codex_cli_path: str = "/Applications/ChatGPT.app/Contents/Resources/codex"
+    codex_model: str = "gpt-5.6-luna"
+    codex_reasoning_effort: Literal[
+        "none", "low", "medium", "high", "xhigh", "max"
+    ] = "max"
+    codex_timeout_sec: float = 1800.0
 
     whisper_model: str = "base"
-    whisper_cache_dir: str = "/whisper-cache"
+    whisper_cache_dir: str = "../.cache/whisper"
 
     @property
     def database_url(self) -> str:

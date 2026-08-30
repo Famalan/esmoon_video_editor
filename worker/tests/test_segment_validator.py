@@ -88,43 +88,43 @@ def test_auto_merge_swallows_short_outro():
     from worker.tasks.segment import auto_merge_short_edges
 
     segments = [
-        {"start": 0.0, "end": 900.0, "title": "a", "summary": "."},
-        {"start": 900.0, "end": 1800.0, "title": "b", "summary": "."},
-        {"start": 1800.0, "end": 1820.0, "title": "outro", "summary": "."},
+        {"start": 0.0, "end": 800.0, "title": "a", "summary": "."},
+        {"start": 800.0, "end": 1600.0, "title": "b", "summary": "."},
+        {"start": 1600.0, "end": 1620.0, "title": "outro", "summary": "."},
     ]
     out = auto_merge_short_edges(segments)
     assert len(out) == 2
-    assert out[-1]["start"] == 900.0
-    assert out[-1]["end"] == 1820.0
+    assert out[-1]["start"] == 800.0
+    assert out[-1]["end"] == 1620.0
     assert out[-1]["title"] == "b"
 
 
-def test_auto_merge_drops_short_intro_when_merge_would_exceed_max():
+def test_auto_merge_keeps_short_intro_when_merge_would_exceed_max():
     from worker.tasks.segment import auto_merge_short_edges
 
     segments = [
         {"start": 0.0, "end": 30.0, "title": "intro", "summary": "."},
-        {"start": 30.0, "end": 2410.0, "title": "long content", "summary": "."},
-        {"start": 2410.0, "end": 3600.0, "title": "next", "summary": "."},
+        {"start": 30.0, "end": 930.0, "title": "long content", "summary": "."},
+        {"start": 930.0, "end": 1700.0, "title": "next", "summary": "."},
     ]
     out = auto_merge_short_edges(segments)
-    assert len(out) == 2
-    assert out[0]["start"] == 30.0
-    assert out[0]["title"] == "long content"
+    assert len(out) == 3
+    assert out[0]["start"] == 0.0
+    assert out[0]["title"] == "intro"
 
 
 def test_auto_merge_swallows_short_middle():
     from worker.tasks.segment import auto_merge_short_edges
 
     segments = [
-        {"start": 0.0, "end": 900.0, "title": "a", "summary": "."},
-        {"start": 900.0, "end": 1391.0, "title": "short middle", "summary": "."},
-        {"start": 1391.0, "end": 2300.0, "title": "c", "summary": "."},
+        {"start": 0.0, "end": 600.0, "title": "a", "summary": "."},
+        {"start": 600.0, "end": 900.0, "title": "short middle", "summary": "."},
+        {"start": 900.0, "end": 1500.0, "title": "c", "summary": "."},
     ]
     out = auto_merge_short_edges(segments)
     assert len(out) == 2
-    assert (out[0]["end"] - out[0]["start"]) >= 600
-    assert (out[1]["end"] - out[1]["start"]) >= 600
+    assert 420 <= (out[0]["end"] - out[0]["start"]) <= 900
+    assert 420 <= (out[1]["end"] - out[1]["start"]) <= 900
 
 
 def test_auto_merge_leaves_well_formed_alone():
@@ -138,16 +138,16 @@ def test_auto_merge_leaves_well_formed_alone():
     assert len(out) == 2
 
 
-def test_validate_allows_short_edge_segments():
-    from worker.tasks.segment import validate_segments
+def test_validate_rejects_short_edge_segments():
+    from worker.tasks.segment import validate_segments, SegmentValidationError
 
     segments = [
         {"start": 0.0, "end": 360.0, "title": "intro", "summary": "."},
         {"start": 360.0, "end": 1200.0, "title": "тема", "summary": "."},
         {"start": 1200.0, "end": 1500.0, "title": "финал", "summary": "."},
     ]
-    out = validate_segments(segments, video_duration=1500.0)
-    assert len(out) == 3
+    with pytest.raises(SegmentValidationError, match="duration"):
+        validate_segments(segments, video_duration=1500.0)
 
 
 def test_validate_rejects_short_middle_segment():

@@ -41,7 +41,7 @@ def run(job_id: str) -> str:
             data = llm.call_json(
                 system=prompt.SYSTEM, user=user,
                 schema=prompt.JSON_SCHEMA, schema_name="youtube_metadata",
-                model=settings.polza_model_metadata,
+                model=settings.codex_model,
             )
             with session_scope() as db:
                 upload = db.execute(

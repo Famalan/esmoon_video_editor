@@ -3,7 +3,10 @@ __pycache__/
 *.pyo
 .pytest_cache/
 .env
+auth.json
+.cache/
 .venv/
+.venv-worker/
 .DS_Store
 .cursor/
 .next/
