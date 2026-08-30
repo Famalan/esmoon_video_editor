@@ -13,6 +13,8 @@ function fmt(sec: number): string {
 }
 
 export function SegmentCard({ segment }: { segment: Segment }) {
+  const durationSec = Math.max(0, segment.end_sec - segment.start_sec);
+
   return (
     <article className="space-y-3 rounded border bg-white p-4">
       <header className="flex flex-wrap items-start justify-between gap-2">
@@ -34,6 +36,9 @@ export function SegmentCard({ segment }: { segment: Segment }) {
       </header>
 
       <div className="flex flex-wrap gap-1.5 text-xs text-neutral-700">
+        <span className="rounded bg-blue-50 px-2 py-1 font-medium text-blue-800">
+          Длительность: {fmt(durationSec)}
+        </span>
         <span className="rounded bg-neutral-100 px-2 py-1">Релевантность: {segment.relevance}</span>
         <span className="rounded bg-neutral-100 px-2 py-1">Боль: {segment.pain}</span>
         <span className="rounded bg-neutral-100 px-2 py-1">Хук: {segment.hook}</span>
