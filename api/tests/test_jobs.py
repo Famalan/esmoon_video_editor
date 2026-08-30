@@ -14,6 +14,7 @@ def test_create_job_with_url_returns_201(client):
     assert body["current_stage"] == "fetch"
     assert body["source_url"] == "https://youtube.com/watch?v=abc"
     assert body["created_by"] == "alice@example.com"
+    assert body["chapters"] == []
     assert "id" in body
 
 

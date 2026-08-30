@@ -15,12 +15,30 @@ function fmt(sec: number): string {
 export function SegmentCard({ segment }: { segment: Segment }) {
   return (
     <article className="space-y-3 rounded border bg-white p-4">
-      <header className="flex items-center justify-between">
+      <header className="flex flex-wrap items-start justify-between gap-2">
         <h2 className="text-lg font-semibold">
           Сегмент {segment.index + 1} · {fmt(segment.start_sec)}–{fmt(segment.end_sec)}
         </h2>
-        <span className="rounded bg-neutral-100 px-2 py-1 text-xs">{segment.status}</span>
+        <div className="flex flex-wrap items-center justify-end gap-1.5">
+          <span
+            className={`rounded px-2 py-1 text-xs font-medium ${
+              segment.decision === "publish"
+                ? "bg-emerald-100 text-emerald-800"
+                : "bg-neutral-100 text-neutral-600"
+            }`}
+          >
+            {segment.decision}
+          </span>
+          <span className="rounded bg-neutral-100 px-2 py-1 text-xs">{segment.status}</span>
+        </div>
       </header>
+
+      <div className="flex flex-wrap gap-1.5 text-xs text-neutral-700">
+        <span className="rounded bg-neutral-100 px-2 py-1">Релевантность: {segment.relevance}</span>
+        <span className="rounded bg-neutral-100 px-2 py-1">Боль: {segment.pain}</span>
+        <span className="rounded bg-neutral-100 px-2 py-1">Хук: {segment.hook}</span>
+        <span className="rounded bg-neutral-100 px-2 py-1">Ценность: {segment.value}</span>
+      </div>
 
       {segment.thumbnails.length > 0 && (
         <ThumbnailPicker

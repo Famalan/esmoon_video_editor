@@ -18,7 +18,9 @@ export default async function JobDetailsPage({
         <p className="text-sm text-neutral-500">{job.source_url ?? "файл"}</p>
       </header>
       <JobProgress initial={job} />
-      {job.status === "succeeded" && <SegmentList jobId={id} />}
+      {job.chapters.length > 0 && (
+        <SegmentList jobId={id} chapters={job.chapters} />
+      )}
     </main>
   );
 }

@@ -4,8 +4,8 @@ import uuid
 from datetime import datetime
 from enum import StrEnum
 
-from sqlalchemy import ARRAY, BigInteger, DateTime, Enum, Float, ForeignKey, Integer, LargeBinary, String, Text
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy import ARRAY, BigInteger, CheckConstraint, DateTime, Enum, Float, ForeignKey, Integer, LargeBinary, String, Text
+from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from worker.db import Base
@@ -42,6 +42,11 @@ class SegmentStatus(StrEnum):
     FAILED = "failed"
 
 
+class SegmentDecision(StrEnum):
+    PUBLISH = "publish"
+    SKIP = "skip"
+
+
 class UploadStatus(StrEnum):
     PENDING = "pending"
     UPLOADING = "uploading"
@@ -64,6 +69,7 @@ class Job(Base):
     created_by: Mapped[str] = mapped_column(String(255))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    chapters: Mapped[list[dict[str, object]]] = mapped_column(JSONB, default=list)
 
     segments: Mapped[list[Segment]] = relationship(back_populates="job", cascade="all, delete-orphan")
     assets: Mapped[list[Asset]] = relationship(back_populates="job", cascade="all, delete-orphan")
@@ -88,6 +94,12 @@ class Asset(Base):
 
 class Segment(Base):
     __tablename__ = "segments"
+    __table_args__ = (
+        CheckConstraint("relevance BETWEEN 0 AND 100", name="segments_relevance_range"),
+        CheckConstraint("pain BETWEEN 0 AND 100", name="segments_pain_range"),
+        CheckConstraint("hook BETWEEN 0 AND 100", name="segments_hook_range"),
+        CheckConstraint("value BETWEEN 0 AND 100", name="segments_value_range"),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_uuid)
     job_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("jobs.id", ondelete="CASCADE"))
@@ -97,6 +109,18 @@ class Segment(Base):
     title: Mapped[str | None] = mapped_column(Text, nullable=True)
     summary: Mapped[str | None] = mapped_column(Text, nullable=True)
     transcript_excerpt: Mapped[str | None] = mapped_column(Text, nullable=True)
+    relevance: Mapped[int] = mapped_column(Integer, default=100)
+    pain: Mapped[int] = mapped_column(Integer, default=100)
+    hook: Mapped[int] = mapped_column(Integer, default=100)
+    value: Mapped[int] = mapped_column(Integer, default=100)
+    decision: Mapped[SegmentDecision] = mapped_column(
+        Enum(
+            SegmentDecision,
+            name="segment_decision",
+            values_callable=lambda obj: [e.value for e in obj],
+        ),
+        default=SegmentDecision.PUBLISH,
+    )
     status: Mapped[SegmentStatus] = mapped_column(Enum(SegmentStatus, name="segment_status", values_callable=lambda obj: [e.value for e in obj]), default=SegmentStatus.PENDING)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     selected_thumbnail_id: Mapped[uuid.UUID | None] = mapped_column(

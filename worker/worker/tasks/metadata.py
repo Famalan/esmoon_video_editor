@@ -5,7 +5,14 @@ from sqlalchemy import select
 from worker.celery_app import app
 from worker.config import settings
 from worker.db import session_scope
-from worker.models import Job, Segment, SegmentStatus, Upload, UploadStatus
+from worker.models import (
+    Job,
+    Segment,
+    SegmentDecision,
+    SegmentStatus,
+    Upload,
+    UploadStatus,
+)
 from worker.progress import publish_progress
 from worker.prompts import metadata as prompt
 from worker.services import llm
@@ -23,6 +30,7 @@ def run(job_id: str) -> str:
         segments = db.execute(
             select(Segment).where(
                 Segment.job_id == job_id,
+                Segment.decision == SegmentDecision.PUBLISH,
                 Segment.status == SegmentStatus.THUMBNAIL_READY,
             ).order_by(Segment.index)
         ).scalars().all()

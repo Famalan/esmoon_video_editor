@@ -5,13 +5,18 @@ from datetime import datetime
 
 from pydantic import BaseModel, Field
 
-from app.models import JobStatus, SourceType
+from app.models import JobStatus, SegmentDecision, SourceType
 from shared.stages import Stage
 
 
 class JobCreate(BaseModel):
     source_type: SourceType
     source_url: str | None = None
+
+
+class ChapterOut(BaseModel):
+    start_sec: float
+    title: str
 
 
 class JobOut(BaseModel):
@@ -23,6 +28,7 @@ class JobOut(BaseModel):
     created_by: str
     created_at: datetime
     error: str | None
+    chapters: list[ChapterOut] = Field(default_factory=list)
 
     model_config = {"from_attributes": True}
 
@@ -47,6 +53,11 @@ class SegmentOut(BaseModel):
     end_sec: float
     title: str | None
     summary: str | None
+    relevance: int
+    pain: int
+    hook: int
+    value: int
+    decision: SegmentDecision
     yt_title: str | None
     yt_description: str | None
     yt_tags: list[str] | None

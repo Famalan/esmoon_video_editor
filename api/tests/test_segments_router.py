@@ -62,6 +62,11 @@ def test_list_segments_for_job(client, db_session, monkeypatch):
     assert len(body["items"]) == 1
     assert body["items"][0]["id"] == str(seg_id)
     assert body["items"][0]["yt_title"] == "title v1"
+    assert body["items"][0]["relevance"] == 100
+    assert body["items"][0]["pain"] == 100
+    assert body["items"][0]["hook"] == 100
+    assert body["items"][0]["value"] == 100
+    assert body["items"][0]["decision"] == "publish"
     assert body["items"][0]["thumbnails"][0]["position_idx"] == 1
 
 

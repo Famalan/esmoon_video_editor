@@ -9,7 +9,7 @@ from sqlalchemy import select
 
 from worker.celery_app import app
 from worker.db import session_scope
-from worker.models import Asset, AssetKind, Job, JobStatus, Segment
+from worker.models import Asset, AssetKind, Job, JobStatus, Segment, SegmentDecision
 from worker.progress import publish_progress
 from worker.config import settings
 from worker.prompts import segment as prompt
@@ -21,101 +21,34 @@ class SegmentValidationError(ValueError):
     pass
 
 
-_MIN_DURATION = 420.0           # 7 мин минимум для каждого сегмента
-_MIN_DURATION_EDGE = 420.0      # первый и последний подчиняются тому же правилу
-_MAX_DURATION = 900.0           # 15 мин максимум для каждого сегмента
 _DURATION_OVERSHOOT = 5.0
 _OVERLAP_TOLERANCE = 1.0
-_TAIL_GAP_TOLERANCE = 60.0      # хвост должен быть покрыт до duration−60s
+_CHAPTER_START_TOLERANCE = 90.0
 _CHUNK_TARGET = 7200.0          # цель ~2ч на один LLM-вызов
-_TAIL_EXTEND_MAX = 900.0        # на сколько максимум растягиваем последний сегмент
 
 
-def _dur(s: dict) -> float:
-    return float(s["end"]) - float(s["start"])
+_SCORE_NAMES = ("relevance", "pain", "hook", "value")
 
 
-def _merge(a: dict, b: dict) -> dict:
-    longer = a if _dur(a) >= _dur(b) else b
-    return {
-        "start": a["start"],
-        "end": b["end"],
-        "title": longer["title"],
-        "summary": longer["summary"],
-    }
-
-
-def auto_merge_short_edges(segments: list[dict]) -> list[dict]:
-    """Сливает слишком короткие сегменты с соседом.
-
-    LLM любит выделять короткий intro/jingle/outro и иногда middle, который
-    короче минимума. Сливаем такие сегменты программно перед валидацией.
-
-    - Первый/последний (edge) сливаем, если он короче 7 минут.
-    - Средний сливаем, если он короче 7 минут; выбираем соседа, после слияния
-      с которым итоговая длина ближе к 660с (цель 11 минут) и не больше 15 минут.
-    """
-    if len(segments) < 2:
-        return segments
-    out = [dict(s) for s in segments]
-
-    while len(out) >= 2 and _dur(out[0]) < _MIN_DURATION_EDGE:
-        if _dur(out[0]) + _dur(out[1]) <= _MAX_DURATION:
-            out[0] = _merge(out[0], out[1])
-            out.pop(1)
-        else:
-            break
-    while len(out) >= 2 and _dur(out[-1]) < _MIN_DURATION_EDGE:
-        if _dur(out[-2]) + _dur(out[-1]) <= _MAX_DURATION:
-            out[-2] = _merge(out[-2], out[-1])
-            out.pop()
-        else:
-            break
-
-    changed = True
-    while changed and len(out) >= 3:
-        changed = False
-        for i in range(1, len(out) - 1):
-            if _dur(out[i]) >= _MIN_DURATION:
-                continue
-            left_after = _dur(out[i - 1]) + _dur(out[i])
-            right_after = _dur(out[i]) + _dur(out[i + 1])
-            target = 660.0
-            candidates = []
-            if left_after <= _MAX_DURATION:
-                candidates.append((abs(left_after - target), "left"))
-            if right_after <= _MAX_DURATION:
-                candidates.append((abs(right_after - target), "right"))
-            if not candidates:
-                continue
-            merge_side = min(candidates)[1]
-            if merge_side == "left":
-                out[i - 1] = _merge(out[i - 1], out[i])
-                out.pop(i)
-            else:
-                out[i] = _merge(out[i], out[i + 1])
-                out.pop(i + 1)
-            changed = True
-            break
-    return out
+def decision_for_scores(segment: dict) -> str:
+    return (
+        SegmentDecision.PUBLISH.value
+        if segment["pain"] >= 70 and segment["value"] >= 70
+        else SegmentDecision.SKIP.value
+    )
 
 
 def validate_segments(segments: list[dict], video_duration: float) -> list[dict]:
     if not segments:
-        raise SegmentValidationError("empty segments")
+        return []
 
-    short_video = video_duration < _MIN_DURATION
-    n = len(segments)
     for i, s in enumerate(segments):
         start = float(s["start"])
         end = float(s["end"])
-        dur = end - start
-        is_edge = i == 0 or i == n - 1
-        min_dur = _MIN_DURATION_EDGE if is_edge else _MIN_DURATION
 
-        if not short_video and not (min_dur <= dur <= _MAX_DURATION):
+        if start < 0 or end <= start:
             raise SegmentValidationError(
-                f"segment {i} duration {dur:.0f}s out of [{min_dur}, {_MAX_DURATION}]"
+                f"segment {i} has invalid range {start:.0f}..{end:.0f}"
             )
         if end > video_duration + _DURATION_OVERSHOOT:
             raise SegmentValidationError(
@@ -125,28 +58,44 @@ def validate_segments(segments: list[dict], video_duration: float) -> list[dict]
             raise SegmentValidationError(
                 f"segments {i - 1} and {i} overlap"
             )
-
-    if not short_video:
-        last_end = float(segments[-1]["end"])
-        if video_duration - last_end > _TAIL_GAP_TOLERANCE:
+        for score_name in _SCORE_NAMES:
+            score = s.get(score_name)
+            if isinstance(score, bool) or not isinstance(score, int) or not 0 <= score <= 100:
+                raise SegmentValidationError(
+                    f"segment {i} {score_name} must be an integer from 0 to 100"
+                )
+        expected_decision = decision_for_scores(s)
+        if s.get("decision") != expected_decision:
             raise SegmentValidationError(
-                f"last segment ends at {last_end:.0f}, leaves "
-                f"{video_duration - last_end:.0f}s tail uncovered "
-                f"(video duration {video_duration:.0f}s)"
+                f"segment {i} decision {s.get('decision')!r} does not match "
+                f"scores; expected {expected_decision!r}"
             )
     return segments
 
 
-def _pad_tail(segments: list[dict], duration: float) -> list[dict]:
-    """Если хвост недостающий, но в пределах _TAIL_EXTEND_MAX — растянем последний сегмент."""
-    if not segments:
-        return segments
-    gap = duration - float(segments[-1]["end"])
-    if _TAIL_GAP_TOLERANCE < gap <= _TAIL_EXTEND_MAX:
-        out = [dict(s) for s in segments]
-        out[-1]["end"] = duration
-        return out
-    return segments
+def validate_chapters(chapters: list[dict], video_duration: float) -> list[dict]:
+    if not chapters:
+        raise SegmentValidationError("empty chapters")
+
+    previous_start = -1.0
+    for i, chapter in enumerate(chapters):
+        start = float(chapter["start"])
+        title = chapter.get("title")
+        if start < 0 or start > video_duration + _DURATION_OVERSHOOT:
+            raise SegmentValidationError(
+                f"chapter {i} starts outside video at {start:.0f}s"
+            )
+        if start <= previous_start:
+            raise SegmentValidationError("chapters must be strictly chronological")
+        if not isinstance(title, str) or not title.strip():
+            raise SegmentValidationError(f"chapter {i} has empty title")
+        previous_start = start
+
+    if float(chapters[0]["start"]) > _CHAPTER_START_TOLERANCE:
+        raise SegmentValidationError(
+            "first chapter does not cover the beginning of the video"
+        )
+    return chapters
 
 
 def _chunk_cues(cues: list[dict], duration: float) -> list[tuple[float, float, list[dict]]]:
@@ -198,16 +147,31 @@ def run(job_id: str) -> str:
 
         try:
             raw = _llm_segment(cues, duration)
+            chapters = validate_chapters(
+                sorted(raw["chapters"], key=lambda c: float(c["start"])),
+                duration,
+            )
             segments = validate_segments(
-                _pad_tail(auto_merge_short_edges(raw), duration), duration
+                sorted(raw["segments"], key=lambda s: float(s["start"])),
+                duration,
             )
         except SegmentValidationError as first_err:
             raw = _llm_segment(cues, duration, retry_hint=str(first_err))
+            chapters = validate_chapters(
+                sorted(raw["chapters"], key=lambda c: float(c["start"])),
+                duration,
+            )
             segments = validate_segments(
-                _pad_tail(auto_merge_short_edges(raw), duration), duration
+                sorted(raw["segments"], key=lambda s: float(s["start"])),
+                duration,
             )
 
         with session_scope() as db:
+            job = db.get(Job, job_id)
+            job.chapters = [
+                {"start_sec": float(c["start"]), "title": c["title"].strip()}
+                for c in chapters
+            ]
             for idx, s in enumerate(segments):
                 db.add(Segment(
                     job_id=job_id,
@@ -216,6 +180,11 @@ def run(job_id: str) -> str:
                     end_sec=float(s["end"]),
                     title=s["title"],
                     summary=s["summary"],
+                    relevance=s["relevance"],
+                    pain=s["pain"],
+                    hook=s["hook"],
+                    value=s["value"],
+                    decision=SegmentDecision(s["decision"]),
                     transcript_excerpt=_extract_excerpt(cues, s["start"], s["end"]),
                 ))
             db.commit()
@@ -232,11 +201,13 @@ def run(job_id: str) -> str:
     return job_id
 
 
-def _llm_segment(cues: list[dict], duration: float, retry_hint: str = "") -> list[dict]:
-    """Прогоняет LLM по транскрипту, разбивая длинные видео на чанки ~2ч."""
+def _llm_segment(cues: list[dict], duration: float, retry_hint: str = "") -> dict:
+    """Строит главы и кандидатов, разбивая длинные видео на чанки ~2ч."""
     chunks = _chunk_cues(cues, duration)
-    raw: list[dict] = []
+    raw: dict[str, list[dict]] = {"chapters": [], "segments": []}
     for idx, (cs, ce, chunk_cues) in enumerate(chunks):
+        if not chunk_cues:
+            continue
         chunk_text = _format_transcript(chunk_cues)
         if len(chunks) == 1:
             user = prompt.USER_TEMPLATE.format(
@@ -247,9 +218,11 @@ def _llm_segment(cues: list[dict], duration: float, retry_hint: str = "") -> lis
                 f"Это часть {idx+1}/{len(chunks)} большого видео общей длительностью "
                 f"{duration:.0f} сек ({_fmt_ts(duration)}). Тебе дан КУСОК от "
                 f"{cs:.0f} ({_fmt_ts(cs)}) до {ce:.0f} ({_fmt_ts(ce)}), длина "
-                f"{ce - cs:.0f} сек. Сегментируй ТОЛЬКО этот кусок: первый сегмент "
-                f"должен начинаться около {cs:.0f}, последний — заканчиваться около {ce:.0f}. "
-                f"Используй РЕАЛЬНЫЕ таймкоды cue из транскрипта.\n\n{chunk_text}"
+                f"{ce - cs:.0f} сек. Составь chapters, которые описывают весь этот кусок. "
+                f"Ищи segments-кандидаты ТОЛЬКО внутри этого куска. "
+                f"Не заполняй кандидатами весь диапазон и не притягивай первого или последнего кандидата "
+                f"к границе куска. Используй РЕАЛЬНЫЕ таймкоды cue из транскрипта.\n\n"
+                f"{chunk_text}"
             )
         if retry_hint:
             user += f"\n\nПрошлый ответ не прошёл валидацию: {retry_hint}. Исправь."
@@ -258,7 +231,8 @@ def _llm_segment(cues: list[dict], duration: float, retry_hint: str = "") -> lis
             schema=prompt.JSON_SCHEMA, schema_name="video_segments",
             model=settings.codex_model,
         )
-        raw.extend(data["segments"])
+        raw["chapters"].extend(data["chapters"])
+        raw["segments"].extend(data["segments"])
     return raw
 
 

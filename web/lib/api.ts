@@ -12,6 +12,11 @@ export type Stage =
 
 export type JobStatus = "queued" | "running" | "succeeded" | "failed";
 
+export interface Chapter {
+  start_sec: number;
+  title: string;
+}
+
 export interface Job {
   id: string;
   source_type: "file" | "url";
@@ -21,6 +26,7 @@ export interface Job {
   created_by: string;
   created_at: string;
   error: string | null;
+  chapters: Chapter[];
 }
 
 export async function listJobs(): Promise<{ items: Job[] }> {
@@ -78,6 +84,11 @@ export interface Segment {
   thumbnails: Thumbnail[];
   video_download_url: string | null;
   status: string;
+  relevance: number;
+  pain: number;
+  hook: number;
+  value: number;
+  decision: "publish" | "skip";
 }
 
 export interface SegmentsList {

@@ -8,7 +8,15 @@ from sqlalchemy import select
 
 from worker.celery_app import app
 from worker.db import session_scope
-from worker.models import Asset, AssetKind, Job, JobStatus, Segment, SegmentStatus
+from worker.models import (
+    Asset,
+    AssetKind,
+    Job,
+    JobStatus,
+    Segment,
+    SegmentDecision,
+    SegmentStatus,
+)
 from worker.progress import publish_progress
 from worker.services import ffmpeg, storage
 from shared.stages import Stage
@@ -29,11 +37,18 @@ def run(job_id: str) -> str:
         ).scalar_one()
         video_key = video_asset.s3_key
         segments = db.execute(
-            select(Segment).where(Segment.job_id == job_id).order_by(Segment.index)
+            select(Segment).where(
+                Segment.job_id == job_id,
+                Segment.decision == SegmentDecision.PUBLISH,
+            ).order_by(Segment.index)
         ).scalars().all()
         segment_data = [
             (str(s.id), float(s.start_sec), float(s.end_sec)) for s in segments
         ]
+
+    if not segment_data:
+        publish_progress(job_id, Stage.CUT, "done")
+        return job_id
 
     tmp = Path(tempfile.mkdtemp(prefix=f"cut_{job_id}_"))
     try:
@@ -66,7 +81,7 @@ def run(job_id: str) -> str:
                     seg.error = f"cut: {exc}"[:500]
                     db.commit()
 
-        if not any_ok:
+        if segment_data and not any_ok:
             raise RuntimeError("cut: all segments failed")
     except Exception as exc:
         with session_scope() as db:
