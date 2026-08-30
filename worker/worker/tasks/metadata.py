@@ -3,6 +3,7 @@ from __future__ import annotations
 from sqlalchemy import select
 
 from worker.celery_app import app
+from worker.config import settings
 from worker.db import session_scope
 from worker.models import Job, Segment, SegmentStatus, Upload, UploadStatus
 from worker.progress import publish_progress
@@ -40,6 +41,7 @@ def run(job_id: str) -> str:
             data = llm.call_json(
                 system=prompt.SYSTEM, user=user,
                 schema=prompt.JSON_SCHEMA, schema_name="youtube_metadata",
+                model=settings.polza_model_metadata,
             )
             with session_scope() as db:
                 upload = db.execute(

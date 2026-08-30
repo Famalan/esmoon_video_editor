@@ -3,6 +3,9 @@ const BASE =
   process.env.NEXT_PUBLIC_API_BASE ??
   "http://localhost:8000";
 
+const PUBLIC_BASE =
+  process.env.NEXT_PUBLIC_API_BASE ?? "http://localhost:8000";
+
 export type Stage =
   | "fetch" | "transcribe" | "segment" | "cut"
   | "thumbnail" | "metadata" | "upload" | "done";
@@ -88,10 +91,20 @@ export interface SegmentPatch {
   selected_thumbnail_id?: string;
 }
 
+function absUrl(u: string | null): string | null {
+  if (!u) return u;
+  return u.startsWith("http") ? u : `${PUBLIC_BASE}${u}`;
+}
+
+function normalizeSegment(s: Segment): Segment {
+  return { ...s, video_download_url: absUrl(s.video_download_url) };
+}
+
 export async function listSegments(jobId: string): Promise<SegmentsList> {
   const r = await fetch(`${BASE}/jobs/${jobId}/segments`, { cache: "no-store" });
   if (!r.ok) throw new Error(`listSegments ${r.status}`);
-  return r.json();
+  const data: SegmentsList = await r.json();
+  return { items: data.items.map(normalizeSegment) };
 }
 
 export async function patchSegment(id: string, body: SegmentPatch): Promise<Segment> {
@@ -101,5 +114,5 @@ export async function patchSegment(id: string, body: SegmentPatch): Promise<Segm
     body: JSON.stringify(body),
   });
   if (!r.ok) throw new Error(`patchSegment ${r.status}`);
-  return r.json();
+  return normalizeSegment(await r.json());
 }

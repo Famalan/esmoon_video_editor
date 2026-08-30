@@ -18,6 +18,17 @@ class Settings(BaseSettings):
     minio_root_user: str
     minio_root_password: str
     minio_bucket: str
+    web_port: int = 3000
+    cors_origins: str | None = None
+
+    @property
+    def cors_allowed_origins(self) -> list[str]:
+        if self.cors_origins:
+            return [origin.strip() for origin in self.cors_origins.split(",") if origin.strip()]
+        return [
+            f"http://localhost:{self.web_port}",
+            f"http://127.0.0.1:{self.web_port}",
+        ]
 
     @property
     def database_url(self) -> str:

@@ -19,7 +19,9 @@ class Settings(BaseSettings):
 
     polza_api_key: str = ""
     polza_base_url: str = "https://api.polza.ai/api/v1"
-    polza_model: str = "google/gemini-3.1-flash-lite"
+    polza_model: str = "google/gemini-3.5-flash"
+    polza_model_segment: str = "google/gemini-3.5-flash"
+    polza_model_metadata: str = "google/gemini-3.5-flash"
 
     whisper_model: str = "base"
     whisper_cache_dir: str = "/whisper-cache"

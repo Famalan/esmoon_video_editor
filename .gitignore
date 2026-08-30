@@ -1,6 +1,10 @@
 __pycache__/
 *.pyc
 *.pyo
+.pytest_cache/
 .env
 .venv/
 .DS_Store
+.cursor/
+.next/
+node_modules/

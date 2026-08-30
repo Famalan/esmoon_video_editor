@@ -114,13 +114,17 @@ def patch_segment(
 
 @router.get("/segments/{segment_id}/download")
 def download_segment(segment_id: uuid.UUID, db: Session = Depends(get_session)) -> Response:
+    seg = db.get(Segment, segment_id)
     asset = db.execute(
         select(Asset).where(
             Asset.segment_id == segment_id,
             Asset.kind == AssetKind.SEGMENT_VIDEO,
         )
     ).scalar_one_or_none()
-    if asset is None:
+    if asset is None or seg is None:
         raise HTTPException(status_code=404, detail="segment video not ready")
-    url = storage.presigned_get_url(asset.s3_key)
+    title = (seg.title or f"segment_{seg.index + 1}").strip()
+    safe = "".join(c if c.isalnum() or c in " -_" else "_" for c in title)[:80].strip() or f"segment_{seg.index + 1}"
+    filename = f"{seg.index + 1:02d}_{safe}.mp4"
+    url = storage.presigned_get_url(asset.s3_key, download_filename=filename)
     return RedirectResponse(url=url, status_code=302)

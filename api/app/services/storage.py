@@ -17,10 +17,18 @@ def _client(endpoint_url: str | None = None):
     )
 
 
-def presigned_get_url(key: str, expires_in: int = 3600) -> str:
+def presigned_get_url(
+    key: str,
+    expires_in: int = 3600,
+    download_filename: str | None = None,
+) -> str:
     public = settings.minio_public_endpoint or settings.minio_endpoint
+    params: dict = {"Bucket": settings.minio_bucket, "Key": key}
+    if download_filename:
+        safe = download_filename.replace('"', "")
+        params["ResponseContentDisposition"] = f'attachment; filename="{safe}"'
     return _client(public).generate_presigned_url(
         "get_object",
-        Params={"Bucket": settings.minio_bucket, "Key": key},
+        Params=params,
         ExpiresIn=expires_in,
     )

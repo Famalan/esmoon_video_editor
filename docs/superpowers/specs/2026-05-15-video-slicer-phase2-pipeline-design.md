@@ -11,7 +11,7 @@
 **Входит:**
 - `fetch` — скачивание видео и субтитров (`yt-dlp`) с сохранением в MinIO.
 - `transcribe` — VTT-парсер для авто-субтитров YouTube; локальный `faster-whisper` (модель `base`) как fallback.
-- `segment` — вызов `polza.ai` (`google/gemini-3.1-flash-lite`, JSON-schema) для разбиения транскрипта на 5–15-минутные смысловые сегменты.
+- `segment` — вызов `polza.ai` (`google/gemini-3.5-flash`, JSON-schema) для разбиения транскрипта на 5–15-минутные смысловые сегменты.
 - `cut` — `ffmpeg` stream-copy (`-c copy`), быстрая нарезка по ключевым кадрам.
 - `thumbnail` — 3 кадра на сегмент (5% / 50% / 95% от длительности).
 - `metadata` — второй LLM-вызов на сегмент: `{yt_title, yt_description, yt_tags}` пишется в существующую таблицу `uploads`.
@@ -100,7 +100,7 @@
    - Если валидация падает — один retry с уточняющим промптом. После второго провала — `Job.failed`.
 5. Создать `Segment` записи (`index`, `start_sec`, `end_sec`, `title`, `summary`, `transcript_excerpt`=первые 500 символов соответствующей части транскрипта).
 
-**Модель:** `google/gemini-3.1-flash-lite` (1M контекст, `structured_outputs=true`, ~22₽/M вход / 137/M выход). Переменная `POLZA_MODEL` в `.env`, легко поменять.
+**Модель:** `google/gemini-3.5-flash` (1M контекст, `structured_outputs=true`, ~22₽/M вход / 137/M выход). Переменная `POLZA_MODEL` в `.env`, легко поменять.
 
 ### 3.4 `cut`
 

@@ -17,13 +17,14 @@ def test_call_json_passes_schema_and_returns_parsed(monkeypatch):
         msg.content = json.dumps({"segments": [{"start": 0, "end": 10, "title": "t", "summary": "s"}]})
         choice = MagicMock()
         choice.message = msg
+        choice.finish_reason = "stop"
         resp = MagicMock()
         resp.choices = [choice]
         return resp
 
     fake_client = MagicMock()
     fake_client.chat.completions.create = fake_create
-    monkeypatch.setattr(llm, "_client", lambda: fake_client)
+    monkeypatch.setattr(llm, "_client", lambda *a, **k: fake_client)
 
     schema = {"type": "object", "properties": {"segments": {"type": "array"}}, "required": ["segments"]}
     result = llm.call_json(
@@ -50,12 +51,13 @@ def test_call_json_raises_on_invalid_json(monkeypatch):
     msg.content = "not a json"
     choice = MagicMock()
     choice.message = msg
+    choice.finish_reason = "stop"
     resp = MagicMock()
     resp.choices = [choice]
 
     fake_client = MagicMock()
     fake_client.chat.completions.create = MagicMock(return_value=resp)
-    monkeypatch.setattr(llm, "_client", lambda: fake_client)
+    monkeypatch.setattr(llm, "_client", lambda *a, **k: fake_client)
 
     with pytest.raises(llm.LLMError):
         llm.call_json(system="s", user="u", schema={}, schema_name="x")

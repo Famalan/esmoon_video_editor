@@ -11,6 +11,7 @@ from worker.celery_app import app
 from worker.db import session_scope
 from worker.models import Asset, AssetKind, Job, JobStatus, Segment
 from worker.progress import publish_progress
+from worker.config import settings
 from worker.prompts import segment as prompt
 from worker.services import ffmpeg, llm, storage
 from shared.stages import Stage
@@ -20,10 +21,78 @@ class SegmentValidationError(ValueError):
     pass
 
 
-_MIN_DURATION = 240.0   # 4 min (с запасом от 5 min target)
-_MAX_DURATION = 1200.0  # 20 min (с запасом от 15 min target)
+_MIN_DURATION = 600.0           # 10 min пол для средних сегментов
+_MIN_DURATION_EDGE = 300.0      # 5 min пол для первого/последнего (intro/outro)
+_MAX_DURATION = 2400.0          # 40 min потолок (после auto-merge может вырасти)
 _DURATION_OVERSHOOT = 5.0
 _OVERLAP_TOLERANCE = 1.0
+_TAIL_GAP_TOLERANCE = 60.0      # хвост должен быть покрыт до duration−60s
+_CHUNK_TARGET = 7200.0          # цель ~2ч на один LLM-вызов
+_TAIL_EXTEND_MAX = 900.0        # на сколько максимум растягиваем последний сегмент
+
+
+def _dur(s: dict) -> float:
+    return float(s["end"]) - float(s["start"])
+
+
+def _merge(a: dict, b: dict) -> dict:
+    longer = a if _dur(a) >= _dur(b) else b
+    return {
+        "start": a["start"],
+        "end": b["end"],
+        "title": longer["title"],
+        "summary": longer["summary"],
+    }
+
+
+def auto_merge_short_edges(segments: list[dict]) -> list[dict]:
+    """Сливает слишком короткие сегменты с соседом.
+
+    LLM любит выделять короткий intro/jingle/outro и иногда middle, который
+    короче минимума. Сливаем такие сегменты программно перед валидацией.
+
+    - Первый/последний (edge) сливаем если короче _MIN_DURATION_EDGE.
+    - Средний сливаем если короче _MIN_DURATION; выбираем соседа, после слияния
+      с которым итоговая длина ближе к 900с (target 15 мин).
+    """
+    if len(segments) < 2:
+        return segments
+    out = [dict(s) for s in segments]
+
+    while len(out) >= 2 and _dur(out[0]) < _MIN_DURATION_EDGE:
+        if _dur(out[0]) + _dur(out[1]) <= _MAX_DURATION:
+            out[0] = _merge(out[0], out[1])
+            out.pop(1)
+        else:
+            out.pop(0)  # сосед уже на потолке — отбрасываем короткий intro
+            break
+    while len(out) >= 2 and _dur(out[-1]) < _MIN_DURATION_EDGE:
+        if _dur(out[-2]) + _dur(out[-1]) <= _MAX_DURATION:
+            out[-2] = _merge(out[-2], out[-1])
+            out.pop()
+        else:
+            out.pop()  # сосед уже на потолке — отбрасываем короткий outro
+            break
+
+    changed = True
+    while changed and len(out) >= 3:
+        changed = False
+        for i in range(1, len(out) - 1):
+            if _dur(out[i]) >= _MIN_DURATION:
+                continue
+            left_after = _dur(out[i - 1]) + _dur(out[i])
+            right_after = _dur(out[i]) + _dur(out[i + 1])
+            target = 900.0
+            merge_left = abs(left_after - target) <= abs(right_after - target)
+            if merge_left:
+                out[i - 1] = _merge(out[i - 1], out[i])
+                out.pop(i)
+            else:
+                out[i] = _merge(out[i], out[i + 1])
+                out.pop(i + 1)
+            changed = True
+            break
+    return out
 
 
 def validate_segments(segments: list[dict], video_duration: float) -> list[dict]:
@@ -31,14 +100,17 @@ def validate_segments(segments: list[dict], video_duration: float) -> list[dict]
         raise SegmentValidationError("empty segments")
 
     short_video = video_duration < _MIN_DURATION
+    n = len(segments)
     for i, s in enumerate(segments):
         start = float(s["start"])
         end = float(s["end"])
         dur = end - start
+        is_edge = i == 0 or i == n - 1
+        min_dur = _MIN_DURATION_EDGE if is_edge else _MIN_DURATION
 
-        if not short_video and not (_MIN_DURATION <= dur <= _MAX_DURATION):
+        if not short_video and not (min_dur <= dur <= _MAX_DURATION):
             raise SegmentValidationError(
-                f"segment {i} duration {dur:.0f}s out of [{_MIN_DURATION}, {_MAX_DURATION}]"
+                f"segment {i} duration {dur:.0f}s out of [{min_dur}, {_MAX_DURATION}]"
             )
         if end > video_duration + _DURATION_OVERSHOOT:
             raise SegmentValidationError(
@@ -48,7 +120,43 @@ def validate_segments(segments: list[dict], video_duration: float) -> list[dict]
             raise SegmentValidationError(
                 f"segments {i - 1} and {i} overlap"
             )
+
+    if not short_video:
+        last_end = float(segments[-1]["end"])
+        if video_duration - last_end > _TAIL_GAP_TOLERANCE:
+            raise SegmentValidationError(
+                f"last segment ends at {last_end:.0f}, leaves "
+                f"{video_duration - last_end:.0f}s tail uncovered "
+                f"(video duration {video_duration:.0f}s)"
+            )
     return segments
+
+
+def _pad_tail(segments: list[dict], duration: float) -> list[dict]:
+    """Если хвост недостающий, но в пределах _TAIL_EXTEND_MAX — растянем последний сегмент."""
+    if not segments:
+        return segments
+    gap = duration - float(segments[-1]["end"])
+    if _TAIL_GAP_TOLERANCE < gap <= _TAIL_EXTEND_MAX:
+        out = [dict(s) for s in segments]
+        out[-1]["end"] = duration
+        return out
+    return segments
+
+
+def _chunk_cues(cues: list[dict], duration: float) -> list[tuple[float, float, list[dict]]]:
+    """Бьёт длинные видео на ~2ч окна. Возвращает [(chunk_start, chunk_end, chunk_cues), ...]."""
+    if duration <= _CHUNK_TARGET * 1.25:
+        return [(0.0, duration, cues)]
+    n = max(2, round(duration / _CHUNK_TARGET))
+    step = duration / n
+    out: list[tuple[float, float, list[dict]]] = []
+    for i in range(n):
+        cs = i * step
+        ce = duration if i == n - 1 else (i + 1) * step
+        chunk = [c for c in cues if cs <= c["start"] < ce]
+        out.append((cs, ce, chunk))
+    return out
 
 
 @app.task(name="worker.tasks.segment.run")
@@ -83,24 +191,16 @@ def run(job_id: str) -> str:
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 
-        transcript_text = _format_transcript(cues)
-        user = prompt.USER_TEMPLATE.format(
-            duration_sec=duration, transcript_lines=transcript_text
-        )
-
         try:
-            data = llm.call_json(
-                system=prompt.SYSTEM, user=user,
-                schema=prompt.JSON_SCHEMA, schema_name="video_segments",
+            raw = _llm_segment(cues, duration)
+            segments = validate_segments(
+                _pad_tail(auto_merge_short_edges(raw), duration), duration
             )
-            segments = validate_segments(data["segments"], duration)
         except SegmentValidationError as first_err:
-            retry_user = user + f"\n\nПрошлый ответ не прошёл валидацию: {first_err}. Исправь."
-            data = llm.call_json(
-                system=prompt.SYSTEM, user=retry_user,
-                schema=prompt.JSON_SCHEMA, schema_name="video_segments",
+            raw = _llm_segment(cues, duration, retry_hint=str(first_err))
+            segments = validate_segments(
+                _pad_tail(auto_merge_short_edges(raw), duration), duration
             )
-            segments = validate_segments(data["segments"], duration)
 
         with session_scope() as db:
             for idx, s in enumerate(segments):
@@ -125,6 +225,36 @@ def run(job_id: str) -> str:
 
     publish_progress(job_id, Stage.SEGMENT, "done")
     return job_id
+
+
+def _llm_segment(cues: list[dict], duration: float, retry_hint: str = "") -> list[dict]:
+    """Прогоняет LLM по транскрипту, разбивая длинные видео на чанки ~2ч."""
+    chunks = _chunk_cues(cues, duration)
+    raw: list[dict] = []
+    for idx, (cs, ce, chunk_cues) in enumerate(chunks):
+        chunk_text = _format_transcript(chunk_cues)
+        if len(chunks) == 1:
+            user = prompt.USER_TEMPLATE.format(
+                duration_sec=duration, transcript_lines=chunk_text
+            )
+        else:
+            user = (
+                f"Это часть {idx+1}/{len(chunks)} большого видео общей длительностью "
+                f"{duration:.0f} сек ({_fmt_ts(duration)}). Тебе дан КУСОК от "
+                f"{cs:.0f} ({_fmt_ts(cs)}) до {ce:.0f} ({_fmt_ts(ce)}), длина "
+                f"{ce - cs:.0f} сек. Сегментируй ТОЛЬКО этот кусок: первый сегмент "
+                f"должен начинаться около {cs:.0f}, последний — заканчиваться около {ce:.0f}. "
+                f"Используй РЕАЛЬНЫЕ таймкоды cue из транскрипта.\n\n{chunk_text}"
+            )
+        if retry_hint:
+            user += f"\n\nПрошлый ответ не прошёл валидацию: {retry_hint}. Исправь."
+        data = llm.call_json(
+            system=prompt.SYSTEM, user=user,
+            schema=prompt.JSON_SCHEMA, schema_name="video_segments",
+            model=settings.polza_model_segment,
+        )
+        raw.extend(data["segments"])
+    return raw
 
 
 def _format_transcript(cues: list[dict]) -> str:

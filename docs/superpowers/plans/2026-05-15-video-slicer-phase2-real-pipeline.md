@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Заменить 6 заглушек стадий из Phase 1 на работающий пайплайн: yt-dlp скачивает видео и субтитры, polza.ai (`google/gemini-3.1-flash-lite`) режет транскрипт на 5–15-минутные сегменты, ffmpeg нарезает клипы и превью, второй LLM-вызов генерирует черновики YouTube-метаданных. UI позволяет редактировать метаданные и выбирать превью.
+**Goal:** Заменить 6 заглушек стадий из Phase 1 на работающий пайплайн: yt-dlp скачивает видео и субтитры, polza.ai (`google/gemini-3.5-flash`) режет транскрипт на 5–15-минутные сегменты, ffmpeg нарезает клипы и превью, второй LLM-вызов генерирует черновики YouTube-метаданных. UI позволяет редактировать метаданные и выбирать превью.
 
 **Architecture:** Линейный Celery `chain` (как в Phase 1) с реальными стадиями. Артефакты лежат в MinIO; БД хранит только метаданные (ключи в MinIO, статусы, тексты). Загрузка в YouTube вынесена в Phase 3.
 
@@ -159,7 +159,7 @@ volumes:
 # LLM (polza.ai, OpenAI-compatible gateway)
 POLZA_API_KEY=
 POLZA_BASE_URL=https://api.polza.ai/api/v1
-POLZA_MODEL=google/gemini-3.1-flash-lite
+POLZA_MODEL=google/gemini-3.5-flash
 
 # Whisper fallback
 WHISPER_MODEL=base
@@ -352,7 +352,7 @@ class WorkerSettings(BaseSettings):
 
     polza_api_key: str = ""
     polza_base_url: str = "https://api.polza.ai/api/v1"
-    polza_model: str = "google/gemini-3.1-flash-lite"
+    polza_model: str = "google/gemini-3.5-flash"
 
     whisper_model: str = "base"
     whisper_cache_dir: str = "/whisper-cache"
