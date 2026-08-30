@@ -138,11 +138,22 @@ def test_get_segment_download_redirects_to_presigned(client, db_session, monkeyp
     db_session.commit()
 
     from app.services import storage as api_storage
+    presigned_args = {}
+
+    def fake_presigned_get_url(key, expires_in=3600, download_filename=None):
+        presigned_args.update(
+            key=key,
+            expires_in=expires_in,
+            download_filename=download_filename,
+        )
+        return f"http://minio.local/{key}?sig=x"
+
     monkeypatch.setattr(
         api_storage, "presigned_get_url",
-        lambda key, expires_in=3600: f"http://minio.local/{key}?sig=x",
+        fake_presigned_get_url,
     )
 
     r = client.get(f"/segments/{seg_id}/download", follow_redirects=False)
     assert r.status_code in (302, 307)
     assert r.headers["location"].startswith("http://minio.local/")
+    assert presigned_args["download_filename"].endswith(".mp4")
