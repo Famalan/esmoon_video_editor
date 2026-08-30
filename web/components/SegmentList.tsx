@@ -63,7 +63,7 @@ export async function SegmentList({
         <div>
           <h2 className="text-xl font-semibold">Оценка найденных фрагментов</h2>
           <p className="mt-1 text-sm text-neutral-500">
-            publish ставится при pain ≥ 70 и value ≥ 70. Длительность не ограничена.
+            publish ставится при pain ≥ 70 и value ≥ 70. Границы определяются полнотой темы, а не заданной длительностью.
           </p>
         </div>
 
