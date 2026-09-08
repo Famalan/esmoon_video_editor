@@ -14,6 +14,7 @@ _TS_RE = re.compile(
 _INLINE_TS_RE = re.compile(r"<\d{1,2}:\d{2}:\d{2}\.\d{3}>")
 _TAG_RE = re.compile(r"</?[a-zA-Z][^>]*>")
 _WS_RE = re.compile(r"\s+")
+TRANSCRIPT_VERSION = "vtt-clean-v2"
 
 
 class Cue(TypedDict):
@@ -36,25 +37,50 @@ def _clean_text(raw: str) -> str:
 
 def parse_vtt(content: str) -> list[Cue]:
     raw_cues: list[Cue] = []
-    lines = content.splitlines()
-    i = 0
-    while i < len(lines):
-        line = lines[i].strip()
-        m = _TS_RE.match(line)
+    youtube_timed = bool(_INLINE_TS_RE.search(content))
+    # YouTube uses a space-only line for the empty upper display row. It is
+    # caption content, not a block separator; consuming it drops the next words.
+    for block in content.replace("\r\n", "\n").split("\n\n"):
+        lines = block.splitlines()
+        timing_index = next((index for index, line in enumerate(lines) if "-->" in line), None)
+        if timing_index is None:
+            continue
+        m = _TS_RE.match(lines[timing_index].strip())
         if not m:
-            i += 1
             continue
         start = _ts_to_sec(m["h"], m["m"], m["s"], m["ms"])
         end = _ts_to_sec(m["eh"], m["em"], m["es"], m["ems"])
-        i += 1
-        text_lines: list[str] = []
-        while i < len(lines) and lines[i].strip():
-            text_lines.append(lines[i])
-            i += 1
-        cleaned = _clean_text(" ".join(text_lines))
+        if end - start < 0.04:
+            continue
+        text_lines = [line.strip() for line in lines[timing_index + 1:] if line.strip()]
+        timed_lines = [line for line in text_lines if _INLINE_TS_RE.search(line)]
+        selected = (timed_lines or text_lines[-1:]) if youtube_timed else text_lines
+        cleaned = _clean_text(" ".join(selected))
         if cleaned:
-            raw_cues.append(Cue(start=start, end=end, text=cleaned))
+            raw_cues.append(Cue(start=start, end=max(start + 0.1, end), text=cleaned))
+    if youtube_timed:
+        return _group_phrases(raw_cues)
     return _dedup_rolling(raw_cues)
+
+
+def _inline_ts_to_sec(value: str) -> float:
+    hours, minutes, seconds = value.strip("<>").split(":")
+    return int(hours) * 3600 + int(minutes) * 60 + float(seconds)
+
+
+def _group_phrases(cues: list[Cue]) -> list[Cue]:
+    groups: list[Cue] = []
+    for cue in cues:
+        previous = groups[-1] if groups else None
+        if (previous and cue["start"] - previous["end"] < 1.7
+                and cue["end"] - previous["start"] <= 12
+                and len(previous["text"]) < 200
+                and not re.search(r"[.!?]$", previous["text"])):
+            previous["end"] = cue["end"]
+            previous["text"] += " " + cue["text"]
+        else:
+            groups.append(Cue(**cue))
+    return groups
 
 
 def _dedup_rolling(cues: list[Cue]) -> list[Cue]:
@@ -79,12 +105,22 @@ def _dedup_rolling(cues: list[Cue]) -> list[Cue]:
             by_range[key] = c
     collapsed = [by_range[k] for k in order]
 
-    # Step 2: drop a cue if its text is a strict prefix of the next cue's text.
+    # Step 2: rolling auto-captions commonly repeat the previous line at the
+    # start of the next cue. Keep only the newly spoken suffix while retaining
+    # the original cue timestamps.
     result: list[Cue] = []
-    for idx, c in enumerate(collapsed):
-        if idx + 1 < len(collapsed):
-            nxt = collapsed[idx + 1]
-            if nxt["text"].startswith(c["text"]) and len(nxt["text"]) > len(c["text"]):
-                continue
-        result.append(c)
+    previous_words: list[str] = []
+    for c in collapsed:
+        words = c["text"].split()
+        if previous_words:
+            maximum = min(len(previous_words), len(words))
+            overlap = 0
+            for size in range(maximum, 2, -1):
+                if [w.casefold() for w in previous_words[-size:]] == [w.casefold() for w in words[:size]]:
+                    overlap = size
+                    break
+            words = words[overlap:]
+        if words:
+            result.append(Cue(start=c["start"], end=c["end"], text=" ".join(words)))
+        previous_words = c["text"].split()
     return result

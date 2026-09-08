@@ -1,4 +1,5 @@
 import json
+import os
 import threading
 
 import pytest
@@ -22,9 +23,7 @@ def _celery_eager():
     yield
 
 
-_TEST_DB_URL = (
-    "postgresql+psycopg://videoslicer:videoslicer@postgres:5432/videoslicer_test"
-)
+_TEST_DB_URL = f"postgresql+psycopg://videoslicer:videoslicer@{os.getenv('POSTGRES_HOST', '127.0.0.1')}:5432/videoslicer_test"
 
 
 @pytest.fixture(scope="session")
@@ -37,6 +36,8 @@ def engine():
 
 @pytest.fixture
 def db_session(engine, monkeypatch):
+    from worker import runtime
+    monkeypatch.setattr(runtime, "engine", engine)
     SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
     monkeypatch.setattr(worker_db, "SessionLocal", SessionLocal)
     session = SessionLocal()

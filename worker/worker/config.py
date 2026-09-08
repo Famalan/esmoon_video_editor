@@ -20,10 +20,10 @@ class Settings(BaseSettings):
     minio_bucket: str = "video-slicer"
 
     codex_cli_path: str = "/Applications/ChatGPT.app/Contents/Resources/codex"
-    codex_model: str = "gpt-5.6-luna"
+    codex_model: str = "gpt-6-astra"
     codex_reasoning_effort: Literal[
         "none", "low", "medium", "high", "xhigh", "max"
-    ] = "max"
+    ] = "medium"
     codex_timeout_sec: float = 1800.0
 
     whisper_model: str = "base"

@@ -85,7 +85,7 @@ def test_patch_segment_updates_metadata(client, db_session, monkeypatch):
 
     r = client.patch(
         f"/segments/{seg_id}",
-        json={"yt_title": "new title", "yt_tags": ["x", "y"]},
+        json={"expected_revision": 1, "yt_title": "new title", "yt_tags": ["x", "y"]},
     )
     assert r.status_code == 200
 
@@ -118,7 +118,7 @@ def test_patch_segment_changes_thumbnail_selection(client, db_session, monkeypat
 
     r = client.patch(
         f"/segments/{seg_id}",
-        json={"selected_thumbnail_id": str(new_thumb.id)},
+        json={"expected_revision": 1, "selected_thumbnail_id": str(new_thumb.id)},
     )
     assert r.status_code == 200
 
@@ -127,38 +127,15 @@ def test_patch_segment_changes_thumbnail_selection(client, db_session, monkeypat
     assert seg.selected_thumbnail_id == new_thumb.id
 
 
-def test_get_segment_download_redirects_to_presigned(client, db_session, monkeypatch):
+def test_legacy_download_remains_available(client, db_session, monkeypatch):
     from app.models import Asset, AssetKind
-
+    from app.services import storage
+    from fastapi import Response
     job_id = uuid.uuid4()
     seg_id, _ = _seed_segment_with_thumbs(db_session, job_id)
-
-    seg_video = Asset(
-        job_id=job_id, kind=AssetKind.SEGMENT_VIDEO,
-        s3_key=f"{job_id}/segments/{seg_id}.mp4",
-        mime="video/mp4", size_bytes=1000,
-        segment_id=seg_id,
-    )
-    db_session.add(seg_video)
+    db_session.add(Asset(job_id=job_id,kind=AssetKind.SEGMENT_VIDEO,s3_key='legacy.mp4',mime='video/mp4',size_bytes=3,segment_id=seg_id))
     db_session.commit()
-
-    from app.services import storage as api_storage
-    presigned_args = {}
-
-    def fake_presigned_get_url(key, expires_in=3600, download_filename=None):
-        presigned_args.update(
-            key=key,
-            expires_in=expires_in,
-            download_filename=download_filename,
-        )
-        return f"http://minio.local/{key}?sig=x"
-
-    monkeypatch.setattr(
-        api_storage, "presigned_get_url",
-        fake_presigned_get_url,
-    )
-
-    r = client.get(f"/segments/{seg_id}/download", follow_redirects=False)
-    assert r.status_code in (302, 307)
-    assert r.headers["location"].startswith("http://minio.local/")
-    assert presigned_args["download_filename"].endswith(".mp4")
+    monkeypatch.setattr(storage,'media_response',lambda key,request,filename=None: Response(b'mp4',media_type='video/mp4'))
+    response = client.get(f'/segments/{seg_id}/download')
+    assert response.status_code == 200
+    assert response.content == b'mp4'

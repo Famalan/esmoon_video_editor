@@ -1,183 +1,63 @@
-# esmoon_video_editor — авто-нарезка YouTube-видео на смысловые сегменты
+# Video Slicer
 
-Сервис принимает ссылку на YouTube-видео и автоматически:
-1. Скачивает видео и автосубтитры (yt-dlp).
-2. Транскрибирует (YouTube VTT, если ≤ 30 мин; иначе faster-whisper).
-3. Создаёт таймкоды-главы для всего исходного видео.
-4. Находит самостоятельные фрагменты через Codex CLI: вход по подписке ChatGPT, модель `gpt-5.6-luna`, `reasoning effort=max`. Длительность не задаётся: один ролик должен полностью раскрывать одну крупную тему, её главную боль и законченное решение. Соседние примеры и подпункты одной темы объединяются.
-5. Оценивает каждый кандидат по `relevance`, `pain`, `hook`, `value`. Решение `publish` принимается при ясной боли и полноценном решении; остальные кандидаты получают `skip`.
-6. Режет ffmpeg-ом только фрагменты с решением `publish`.
-7. Делает 3 превью на публикуемый сегмент.
-8. Генерирует YouTube-метаданные (title, description, tags) через LLM.
-9. Отдаёт результат в веб-UI с возможностью править метаданные и выбирать превью.
+Локальное приложение: YouTube-ссылка или видеофайл → смысловая разметка → проверенные MP4 → необязательная корректировка → скачивание комплекта.
 
-Стек: FastAPI + Celery + Postgres + Redis + MinIO + Next.js 15.
+Профиль **«Цельные эпизоды», версия 1.0** выбирает один непрерывный диапазон исходника для каждого ролика. Фактическая длительность MP4 — **90–1500 секунд включительно**. Внутренние вырезы, склейки, перестановки, ускорение и дополнение тишиной не используются. Разметка, проверка смысла и метаданные используют **GPT-6 Astra, reasoning medium** через локальный Codex CLI с существующим входом ChatGPT.
 
----
+Стек: FastAPI, Celery, Postgres, Redis, MinIO, Next.js. Обработчик запускается на Mac; авторизация Codex не копируется в Docker.
 
-## 1. Требования
+## Запуск
 
-- macOS с приложением ChatGPT и активной подпиской, в которой доступен Codex
-- Python 3.12 и ffmpeg для локального worker
-- Docker Desktop (или Docker Engine + compose v2) для Postgres, Redis, MinIO, API и Web UI
-- Свободные порты: `5432`, `6379`, `9000`, `9001`, `8000`, `3000`
-- ~20 ГБ свободного места (модели Whisper кэшируются в `.cache/whisper`)
+Нужны Docker Desktop, Python 3.12, ffmpeg/ffprobe и авторизованный Codex CLI. При первой настройке создайте `.env` из `.env.example`. Затем из корня проекта:
 
-## 2. Первый запуск
-
-```bash
-# 1. Скопировать .env
-cp .env.example .env
-
-# 2. Проверить локальный вход в Codex через подписку ChatGPT
-"/Applications/ChatGPT.app/Contents/Resources/codex" login status
-
-# 3. Создать отдельное Python-окружение и установить локальный worker
+```sh
 ./scripts/setup-local-worker.sh
-
-# 4. Поднять инфраструктуру, API и Web UI
-docker compose up -d --build
-
-# 5. Применить миграции Postgres
-docker compose exec api alembic upgrade head
-
-# 6. В отдельном окне терминала запустить локальный worker
-./scripts/run-worker-local.sh
+./scripts/start-local.sh
 ```
 
-Worker работает прямо на Mac. Он использует вход, уже сохранённый приложением ChatGPT. Файл `~/.codex/auth.json` не копируется и не передаётся в Docker.
+Обычный запуск повторно использует установленные образы; недостающие собираются автоматически. После изменения зависимостей пересоберите их: `./scripts/start-local.sh --build`. Код приложения подключён из рабочего каталога.
 
-Bucket в MinIO создаётся автоматически при первой загрузке файла воркером (`ensure_bucket()` в `worker/worker/services/storage.py`).
+Единый запуск проверяет авторизацию и зависимости, поднимает инфраструктуру, ждёт завершения активных заданий, сохраняет и проверяет резервную копию БД, согласованно обновляет API и worker и проверяет готовность. Повторный запуск управляет только своим процессом из `.cache/run/worker.pid`. Логи — `.cache/run/worker.log`, резервные копии — `.cache/backups/`. Для разработки отдельный запуск обработчика сохранён: `./scripts/run-worker-local.sh`.
 
-После этого:
-- API: http://localhost:8000 (docs: http://localhost:8000/docs)
-- Web UI: http://localhost:3000
-- MinIO console: http://localhost:9001 (логин/пароль из `.env`, по умолчанию `minioadmin`/`minioadmin`)
+- Приложение: http://localhost:3000
+- API и документация: http://localhost:8000/docs
+- Совместимая проверка жизни: `GET /health` → `{"status":"ok"}`
+- Готовность БД, очереди, MinIO, обработчика и Codex: `GET /health/ready`
 
-## 3. Запуск нарезки
+Порты API/Web задаются `.env`; обработчик подключается к локальным Postgres/Redis/MinIO. Профиль v1 фиксирует модель и reasoning, поэтому launcher задаёт их независимо от старых значений `.env`.
 
-### Через UI
-1. Открыть http://localhost:3000
-2. Вставить ссылку на YouTube-видео → «Запустить»
-3. Дождаться, пока job перейдёт в `succeeded`
-4. Вверху страницы появятся таймкоды всего исходника, ниже — оценки всех кандидатов и карточки фрагментов с решением `publish`
+## Работа
 
-### Через API
-```bash
-# Создать джоб (created_by берётся из заголовка X-User; по умолчанию "anonymous")
-curl -X POST http://localhost:8000/jobs \
-  -H 'Content-Type: application/json' \
-  -H 'X-User: you@example.com' \
-  -d '{"source_type":"url", "source_url":"https://www.youtube.com/watch?v=..."}'
+1. Откройте «Новый анализ». Вставьте YouTube-ссылку или выберите файл до **10 ГБ (10 000 000 000 байт)**. Можно указать пожелания к теме и аудитории.
+2. Файл загружается с прогрессом. При обрыве выберите его заново: возобновления по частям нет. Пустой/повреждённый контейнер и превышение размера не создают задание анализа.
+3. Для YouTube сначала выполняется разметка по доступной расшифровке. Если видеовход уже сохранён, обработка продолжается до MP4; без него страница показывает готовые эпизоды и таймкоды, а скачивание видео не запускается. Результат обновляется без перезагрузки. Смысловая разметка и технически проверенные MP4 показаны отдельно.
+4. Просмотрите клип и окружающие реплики исходника. Можно изменить начало/конец предложенного эпизода, исключить или вернуть его, выбрать превью и исправить метаданные. Явное сохранение показывает состояние и ошибку; открытие карточки ничего не сохраняет.
+5. Новые границы создают новую медиаревизию только этого ролика. Старые файлы доступны в истории версий. Ручные метаданные сохраняются и после изменения границ отмечаются как требующие внимания.
+6. При частичной ошибке исправные MP4 доступны отдельно. «Повторить» запускает неудавшиеся этапы. Устаревшая версия карточки вызывает конфликт, чтобы одна правка не затёрла другую.
+7. Разметку без видео можно скачать как JSON. Для готовых MP4 экспорт фиксирует выбранные проверенные версии. ZIP содержит MP4, превью, `index.html`, `report.pdf` и `manifest.json` с идентификаторами и SHA256. Распакуйте ZIP целиком: HTML использует относительные ссылки и работает офлайн. Отдельно скачанный HTML требует папки `clips` и `thumbnails` рядом. Последующие правки не меняют уже собранный архив.
 
-# Статус и текущая стадия джоба (фронт опрашивает поллингом):
-curl http://localhost:8000/jobs/<job_id>
+Telegram и создание совершенно новых эпизодов вручную в этой версии отсутствуют.
 
-# Список сегментов после succeeded:
-curl http://localhost:8000/jobs/<job_id>/segments
+## Кэш и история
+
+YouTube-источник определяется по video ID, файл — по SHA256 содержимого. Новый анализ сохраняет предыдущий Job и использует имеющиеся оригинал и расшифровку. Несовместимый исходник получает кэшируемое H.264/AAC-превью. Автосубтитры очищаются от повторов отображения с сохранением таймкодов. Окна длинной расшифровки перекрываются на 25 минут; отдельная проверка отсеивает незаконченные ответы и дубли.
+
+В Job фиксируются правила, модель, reasoning, версия промпта и расшифровки. Старые задания и файлы сохраняются; неизвестные исторические правила остаются неизвестными. Экспериментальные экспорты из внешних папок не импортируются.
+
+Рендер декодирует исходник и кодирует H.264/AAC (VideoToolbox на Mac, libx264 при недоступности). Перед публикацией файла ffprobe измеряет длительность, затем аудио и видео полностью декодируются для проверки. Превью извлекаются из готового клипа, метаданные создаются по полному выбранному тексту.
+
+## API и проверка
+
+Подробный контракт и схема состояний: [docs/predictable-slicer-contract.md](docs/predictable-slicer-contract.md).
+
+```sh
+# Изолированная тестовая БД videoslicer_test; рабочая БД не меняется.
+docker compose exec -T api pytest -q
+PYTHONPATH=worker:shared .venv-worker/bin/python -m pytest worker/tests -q
+docker compose exec -T web npx tsc --noEmit
+docker compose exec -T web npm run build
 ```
 
-Прогресс по стадиям дополнительно публикуется в Redis pub/sub-канал `job_progress` — можно подписаться через `redis-cli SUBSCRIBE job_progress` для отладки.
+Для идемпотентного запуска/экспорта передавайте `Idempotency-Key` на один логический запрос. PATCH эпизода требует `expected_revision`. Воспроизведение через API поддерживает HTTP Range и не зависит от срока действия подписанной ссылки. Подробный прогресс хранится в БД и публикуется в Redis-канале `job-progress`.
 
-## 4. Переменные окружения (`.env`)
-
-| Переменная | Назначение | По умолчанию |
-|---|---|---|
-| `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` | креды Postgres | `videoslicer` |
-| `REDIS_URL` | URL Redis (брокер Celery + pub/sub прогресса) | `redis://redis:6379/0` |
-| `MINIO_ROOT_USER` / `MINIO_ROOT_PASSWORD` | креды MinIO | `minioadmin` |
-| `MINIO_ENDPOINT` | внутренний адрес MinIO (api ↔ minio внутри сети) | `http://minio:9000` |
-| `MINIO_PUBLIC_ENDPOINT` | публичный адрес для presigned-URL (браузер ↔ minio) | `http://localhost:9000` |
-| `MINIO_BUCKET` | имя bucket-а | `video-slicer` |
-| `CODEX_CLI_PATH` | путь к локальному Codex CLI | `/Applications/ChatGPT.app/Contents/Resources/codex` |
-| `CODEX_MODEL` | модель для сегментов и метаданных | `gpt-5.6-luna` |
-| `CODEX_REASONING_EFFORT` | глубина рассуждений модели | `max` |
-| `CODEX_TIMEOUT_SEC` | максимум времени одного вызова Codex | `1800` |
-| `WHISPER_MODEL` | размер модели faster-whisper | `base` |
-| `API_PORT` / `WEB_PORT` | проброшенные порты | `8000` / `3000` |
-| `NEXT_PUBLIC_API_BASE` | URL API для фронта | `http://localhost:8000` |
-
-## 5. Сервисы и порты
-
-| Сервис | Порт | Что делает |
-|---|---|---|
-| `postgres` | 5432 | основная БД + `videoslicer_test` для тестов |
-| `redis` | 6379 | брокер Celery + pub/sub прогресса |
-| `minio` | 9000 (API), 9001 (console) | хранилище видео/превью/транскриптов |
-| `api` | 8000 | FastAPI + Alembic |
-| `worker` | локальный процесс macOS | Celery worker (concurrency=1), все стадии пайплайна и Codex CLI |
-| `web` | 3000 | Next.js 15 App Router |
-
-## 6. Тесты
-
-```bash
-# Worker (юниты, запуск из корня репозитория)
-cd worker && ../.venv-worker/bin/pytest tests/ -v
-
-# API
-docker compose exec api pytest tests/ -v
-```
-
-Тесты используют изолированную БД `videoslicer_test` (создаётся init-скриптом `db/init/01_create_test_db.sql` при первом старте volume-а Postgres) — dev-БД не затрагивается.
-
-## 7. Типичные операции
-
-**Перечитать `.env` (после правки переменных):**
-```bash
-docker compose up -d --force-recreate api
-./scripts/run-worker-local.sh
-```
-`docker compose restart` не перечитывает `env_file`, поэтому API нужен `--force-recreate`. Локальный worker нужно остановить и запустить заново.
-
-**Посмотреть прогресс конкретного джоба в логах воркера:**
-```bash
-./scripts/run-worker-local.sh 2>&1 | grep <job_id>
-```
-
-**Сбросить состояние БД и пересоздать миграции с нуля:**
-```bash
-docker compose down -v          # удаляет volume pg_data → видео и тесты тоже улетят
-docker compose up -d
-docker compose exec api alembic upgrade head
-```
-
-**Очистить MinIO (если bucket мусорный):**
-
-Зайти в MinIO console (http://localhost:9001), удалить bucket `video-slicer`. При следующей загрузке воркер пересоздаст его автоматически.
-
-## 8. Стадии пайплайна (для отладки)
-
-`fetch` → `transcribe` → `segment` → `cut` → `thumbnail` → `metadata`
-
-Каждая стадия публикует прогресс в Redis-канал `job_progress`. Падение любой → `job.status = FAILED` с текстом ошибки в `job.error`.
-
-Для длинных видео (> 30 мин) автосабы YouTube игнорируются и используется Whisper — это даёт чистый транскрипт без rolling-captions.
-
-## 9. Безопасность
-
-- `.env`, `auth.json`, `.cache/` и `.venv-worker/` находятся в `.gitignore`.
-- Codex использует локальный вход ChatGPT. `~/.codex/auth.json` считается паролем: его нельзя копировать в репозиторий, Docker-образ или логи.
-- Presigned URL-ы MinIO живут 1 час.
-- Полные транскрипты и данные авторизации не логируются.
-
-## 10. Структура репо
-
-```
-api/                FastAPI + Alembic
-  app/
-    routers/        /jobs, /segments, /assets
-    services/       storage (boto3), celery_client
-    models.py       SQLAlchemy 2
-  alembic/versions/
-worker/             Celery worker
-  worker/
-    tasks/          fetch, transcribe, segment, cut, thumbnail, metadata, chain
-    services/       ffmpeg, vtt, whisper, storage, llm
-    prompts/        segment, metadata
-web/                Next.js 15 (App Router)
-  app/jobs/[id]/    страница джоба + SegmentList
-  components/       SegmentCard, ThumbnailPicker, MetadataEditor
-shared/             общий пакет (Stage enum)
-db/init/            init-скрипты Postgres (создание тестовой БД)
-docs/               планы и спецификации
-```
+При восстановлении сначала остановите API/worker и используйте проверенную резервную копию Postgres. Не удаляйте Docker volumes или bucket MinIO: там хранятся исходники, история и готовые пакеты.

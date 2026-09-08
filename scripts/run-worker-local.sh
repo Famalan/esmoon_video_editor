@@ -7,6 +7,9 @@ export POSTGRES_HOST=127.0.0.1
 export REDIS_URL=redis://127.0.0.1:6379/0
 export MINIO_ENDPOINT=http://127.0.0.1:9000
 export CODEX_CLI_PATH="${CODEX_CLI_PATH:-/Applications/ChatGPT.app/Contents/Resources/codex}"
+export CODEX_MODEL=gpt-6-astra
+export CODEX_REASONING_EFFORT=medium
+export PYTHONPATH="$PROJECT_ROOT/worker:$PROJECT_ROOT/shared${PYTHONPATH:+:$PYTHONPATH}"
 export WHISPER_CACHE_DIR="${WHISPER_CACHE_DIR:-$PROJECT_ROOT/.cache/whisper}"
 
 if [ ! -x "$PROJECT_ROOT/.venv-worker/bin/celery" ]; then

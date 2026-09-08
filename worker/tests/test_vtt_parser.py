@@ -72,3 +72,31 @@ def test_parse_vtt_dedups_rolling_prefix_cues():
     )
     cues = parse_vtt(text)
     assert [c["text"] for c in cues] == ["привет мир как дела", "новая фраза"]
+
+
+def test_parse_vtt_removes_previous_line_carried_into_next_cue():
+    from worker.services.vtt import parse_vtt
+
+    text = (
+        "WEBVTT\n\n"
+        "00:00:00.000 --> 00:00:04.000\nмы обсуждаем сложную рабочую ситуацию\n\n"
+        "00:00:04.000 --> 00:00:08.000\nсложную рабочую ситуацию и теперь ищем решение\n"
+    )
+    cues = parse_vtt(text)
+
+    assert [cue["text"] for cue in cues] == [
+        "мы обсуждаем сложную рабочую ситуацию",
+        "и теперь ищем решение",
+    ]
+
+
+def test_youtube_space_only_display_row_keeps_question_beginning_and_timestamps():
+    from worker.services.vtt import parse_vtt
+    text=('WEBVTT\n\n'
+          '00:04:53.520 --> 00:04:56.230\n \nчто<00:04:53.759><c> на</c><00:04:54.000><c> рынке</c>\n\n'
+          '00:04:56.230 --> 00:04:56.240\nчто на рынке\n \n\n'
+          '00:04:56.240 --> 00:04:59.469\nчто на рынке\nфронтенда<00:04:56.919><c> сейчас,</c>\n')
+    cues=parse_vtt(text)
+    assert ' '.join(c['text'] for c in cues)=='что на рынке фронтенда сейчас,'
+    assert cues[0]['start']==293.52
+    assert cues[-1]['end']==299.469

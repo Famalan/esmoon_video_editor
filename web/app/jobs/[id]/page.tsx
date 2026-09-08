@@ -1,26 +1,14 @@
-import { JobProgress } from "@/components/JobProgress";
-import { SegmentList } from "@/components/SegmentList";
-import { getJob } from "@/lib/api";
-
+import type { Metadata } from "next";
+import { JobWorkspace } from "@/components/JobWorkspace";
+import { getJob, listSegments } from "@/lib/api";
 export const dynamic = "force-dynamic";
-
+export const metadata: Metadata = { title: "Результат анализа" };
 export default async function JobDetailsPage({
   params,
 }: {
   params: Promise<{ id: string }>;
 }) {
   const { id } = await params;
-  const job = await getJob(id);
-  return (
-    <main className="space-y-6">
-      <header>
-        <h1 className="text-2xl font-semibold">Задача {id.slice(0, 8)}</h1>
-        <p className="text-sm text-neutral-500">{job.source_url ?? "файл"}</p>
-      </header>
-      <JobProgress initial={job} />
-      {job.chapters.length > 0 && (
-        <SegmentList jobId={id} chapters={job.chapters} />
-      )}
-    </main>
-  );
+  const [job, segments] = await Promise.all([getJob(id), listSegments(id)]);
+  return <JobWorkspace initialJob={job} initialSegments={segments.items} />;
 }

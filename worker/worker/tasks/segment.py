@@ -1,263 +1,374 @@
 from __future__ import annotations
 
 import json
-import shutil
-import tempfile
-from pathlib import Path
+import uuid
 
 from sqlalchemy import select
 
-from worker.celery_app import app
-from worker.db import session_scope
-from worker.models import Asset, AssetKind, Job, JobStatus, Segment, SegmentDecision
-from worker.progress import publish_progress
-from worker.config import settings
-from worker.prompts import segment as prompt
-from worker.services import ffmpeg, llm, storage
+from shared.policy import MAX_DURATION, MIN_DURATION, PolicyError, analysis_duration, validate_interval
 from shared.stages import Stage
+from worker.celery_app import app
+from worker.config import settings
+from worker.db import session_scope
+from worker.models import JobStatus, Segment, SegmentDecision, SegmentRevision, Source
+from worker.progress import publish_progress
+from worker.prompts import segment as prompt
+from worker.runtime import require_job_attempt
+from worker.services import llm, storage
 
 
 class SegmentValidationError(ValueError):
     pass
 
 
-_DURATION_OVERSHOOT = 5.0
-_OVERLAP_TOLERANCE = 1.0
-_CHAPTER_START_TOLERANCE = 90.0
-_CHUNK_TARGET = 7200.0          # цель ~2ч на один LLM-вызов
-
-
+_CHUNK_TARGET = 7200.0
+_WINDOW_OVERLAP = 1500.0
 _SCORE_NAMES = ("relevance", "pain", "hook", "value")
 
 
 def decision_for_scores(segment: dict) -> str:
-    return (
-        SegmentDecision.PUBLISH.value
-        if segment["pain"] >= 70 and segment["value"] >= 70
-        else SegmentDecision.SKIP.value
-    )
+    return SegmentDecision.PUBLISH.value if segment["pain"] >= 70 and segment["value"] >= 70 else SegmentDecision.SKIP.value
 
 
 def validate_segments(segments: list[dict], video_duration: float) -> list[dict]:
-    if not segments:
-        return []
-
-    for i, s in enumerate(segments):
-        start = float(s["start"])
-        end = float(s["end"])
-
-        if start < 0 or end <= start:
-            raise SegmentValidationError(
-                f"segment {i} has invalid range {start:.0f}..{end:.0f}"
-            )
-        if end > video_duration + _DURATION_OVERSHOOT:
-            raise SegmentValidationError(
-                f"segment {i} end {end:.0f} exceeds video duration {video_duration:.0f}"
-            )
-        if i > 0 and start + _OVERLAP_TOLERANCE < segments[i - 1]["end"]:
-            raise SegmentValidationError(
-                f"segments {i - 1} and {i} overlap"
-            )
+    previous_end: float | None = None
+    for i, item in enumerate(segments):
+        try:
+            validate_interval(item["start"], item["end"], video_duration)
+        except (PolicyError, KeyError) as exc:
+            raise SegmentValidationError(f"segment {i} has invalid range: {exc}") from exc
+        start, end = float(item["start"]), float(item["end"])
+        if previous_end is not None and start < previous_end:
+            raise SegmentValidationError(f"segments {i - 1} and {i} overlap")
+        previous_end = end
         for score_name in _SCORE_NAMES:
-            score = s.get(score_name)
+            score = item.get(score_name)
             if isinstance(score, bool) or not isinstance(score, int) or not 0 <= score <= 100:
-                raise SegmentValidationError(
-                    f"segment {i} {score_name} must be an integer from 0 to 100"
-                )
-        expected_decision = decision_for_scores(s)
-        if s.get("decision") != expected_decision:
-            raise SegmentValidationError(
-                f"segment {i} decision {s.get('decision')!r} does not match "
-                f"scores; expected {expected_decision!r}"
-            )
+                raise SegmentValidationError(f"segment {i} {score_name} must be an integer from 0 to 100")
+        expected = decision_for_scores(item)
+        if item.get("decision") != expected:
+            raise SegmentValidationError(f"segment {i} decision {item.get('decision')!r} does not match scores; expected {expected!r}")
     return segments
 
 
 def validate_chapters(chapters: list[dict], video_duration: float) -> list[dict]:
     if not chapters:
         raise SegmentValidationError("empty chapters")
-
-    previous_start = -1.0
+    previous = -1.0
     for i, chapter in enumerate(chapters):
         start = float(chapter["start"])
-        title = chapter.get("title")
-        if start < 0 or start > video_duration + _DURATION_OVERSHOOT:
-            raise SegmentValidationError(
-                f"chapter {i} starts outside video at {start:.0f}s"
-            )
-        if start <= previous_start:
-            raise SegmentValidationError("chapters must be strictly chronological")
-        if not isinstance(title, str) or not title.strip():
+        if start < 0 or start > video_duration or start <= previous:
+            raise SegmentValidationError(f"chapter {i} is outside or not chronological")
+        if not str(chapter.get("title", "")).strip():
             raise SegmentValidationError(f"chapter {i} has empty title")
-        previous_start = start
-
-    if float(chapters[0]["start"]) > _CHAPTER_START_TOLERANCE:
-        raise SegmentValidationError(
-            "first chapter does not cover the beginning of the video"
-        )
+        previous = start
+    if float(chapters[0]["start"]) > 90:
+        raise SegmentValidationError("first chapter does not cover the beginning of the video")
     return chapters
 
 
 def _chunk_cues(cues: list[dict], duration: float) -> list[tuple[float, float, list[dict]]]:
-    """Бьёт длинные видео на ~2ч окна. Возвращает [(chunk_start, chunk_end, chunk_cues), ...]."""
-    if duration <= _CHUNK_TARGET * 1.25:
+    if duration <= _CHUNK_TARGET:
         return [(0.0, duration, cues)]
-    n = max(2, round(duration / _CHUNK_TARGET))
-    step = duration / n
-    out: list[tuple[float, float, list[dict]]] = []
-    for i in range(n):
-        cs = i * step
-        ce = duration if i == n - 1 else (i + 1) * step
-        chunk = [c for c in cues if cs <= c["start"] < ce]
-        out.append((cs, ce, chunk))
-    return out
+    windows: list[tuple[float, float, list[dict]]] = []
+    start = 0.0
+    while start < duration:
+        end = min(duration, start + _CHUNK_TARGET)
+        windows.append((start, end, [cue for cue in cues if cue["end"] >= start and cue["start"] <= end]))
+        if end == duration:
+            break
+        start = end - _WINDOW_OVERLAP
+    return windows
+
+
+def _normalize_candidates(candidates: list[dict], duration: float) -> list[dict]:
+    normalized: list[dict] = []
+    for item in sorted(candidates, key=lambda value: (float(value["start"]), float(value["end"]))):
+        start, end = float(item["start"]), float(item["end"])
+        item = {**item, "start": start, "end": end, "rejection_reason": item.get("rejection_reason")}
+        length = end - start
+        if start < 0 or end <= start or end > duration:
+            item["decision"] = "skip"
+            item["rejection_reason"] = item["rejection_reason"] or "Модель вернула границы за пределами исходника; автоматически исправлять их нельзя."
+            normalized.append(item)
+            continue
+        elif length < MIN_DURATION or length > MAX_DURATION:
+            item["decision"] = "skip"
+            item["rejection_reason"] = item["rejection_reason"] or "Цельная тема выходит за допустимую длительность 90–1500 секунд."
+        elif item["decision"] == "skip":
+            item["rejection_reason"] = item["rejection_reason"] or "Недостаточно ясной боли или законченного решения."
+        # Overlap-window duplicates: retain the more complete interval.
+        duplicate = next((old for old in normalized if old["decision"] == "publish" and min(old["end"], end) - max(old["start"], start) > 0.7 * min(old["end"] - old["start"], length)), None)
+        if duplicate:
+            if length > duplicate["end"] - duplicate["start"]:
+                normalized[normalized.index(duplicate)] = item
+            continue
+        normalized.append(item)
+    return sorted(normalized, key=lambda value: value["start"])
+
+
+_REVIEW_SCHEMA = {
+    "type": "object", "additionalProperties": False, "required": ["reviews"],
+    "properties": {"reviews": {"type": "array", "items": {"type": "object", "additionalProperties": False,
+        "required": ["candidate_id", "ok", "reason", "start", "end"], "properties": {
+            "candidate_id": {"type": "integer"}, "ok": {"type": "boolean"}, "reason": {"type": "string", "maxLength": 500},
+            "start": {"type": "number"}, "end": {"type": "number"}
+        }}}},
+}
+
+
+def _narrative_review(cues: list[dict], candidates: list[dict], topic: str | None, audience: str | None, duration: float, *, allow_adjustment: bool = True) -> list[dict]:
+    if not candidates:
+        return candidates
+    reviewable: list[tuple[int, dict]] = []
+    for index, item in enumerate(candidates):
+        if item["decision"] == "publish":
+            reviewable.append((index, item))
+        else:
+            item["narrative"] = {"ok": False, "reason": item.get("rejection_reason") or "Кандидат отклонён при разметке."}
+    reviews: dict[int, dict] = {}
+    for offset in range(0, len(reviewable), 6):
+        excerpts = []
+        for index, item in reviewable[offset:offset + 6]:
+            context_cues = [cue for cue in cues if cue["end"] >= max(0, item["start"] - 45) and cue["start"] <= item["end"] + 45]
+            context = _format_transcript(context_cues)
+            excerpts.append(f"Кандидат {index}. ВЫБРАННЫЙ ДИАПАЗОН: {item['start']:.3f}–{item['end']:.3f}. Строки до и после — только контекст:\n{context}")
+        data = llm.call_json(
+            system=("Ты финальный редактор. Для каждого непрерывного кандидата проверь, что начало даёт нужный контекст, "
+                    "конец содержит вывод, внутри одна тема и ответ не оборван на границе окна. Нельзя предлагать склейки. "
+                    "ok=false для обрыва, смешения тем или неполного ответа. "
+                    + ("Верни start/end на точных границах cue; можно сдвинуть каждую границу максимум на 45 секунд, чтобы сохранить вступление или вывод."
+                       if allow_adjustment else
+                       "Проверь ровно указанные границы пользователя и верни те же start/end без изменения. Короткая пауза по краям допустима. Если ответ в этих границах неполон, верни ok=false.")),
+            user=f"Тема: {topic or 'не задана'}\nАудитория: {audience or 'не задана'}\n\n" + "\n\n".join(excerpts),
+            schema=_REVIEW_SCHEMA, schema_name="narrative_reviews", model=settings.codex_model,
+        )
+        reviews.update({int(row["candidate_id"]): row for row in data["reviews"]})
+    for index, item in enumerate(candidates):
+        if index not in reviews:
+            if item["decision"] == "publish":
+                item["decision"] = "skip"
+                item["rejection_reason"] = "Модель не вернула проверку кандидата."
+                item["narrative"] = {"ok": False, "reason": item["rejection_reason"]}
+            continue
+        review = reviews.get(index, {"ok": False, "reason": "Модель не вернула проверку кандидата."})
+        if review["ok"]:
+            proposed_start, proposed_end = float(review["start"]), float(review["end"])
+            cue_starts = {round(float(cue["start"]), 3) for cue in cues}
+            cue_ends = {round(float(cue["end"]), 3) for cue in cues}
+            try:
+                validate_interval(proposed_start, proposed_end, duration)
+                exact_cues = round(proposed_start, 3) in cue_starts and round(proposed_end, 3) in cue_ends
+                close = abs(proposed_start - item["start"]) <= 45 and abs(proposed_end - item["end"]) <= 45
+                unchanged = proposed_start == item["start"] and proposed_end == item["end"]
+                if allow_adjustment and exact_cues and close:
+                    item["start"], item["end"] = proposed_start, proposed_end
+                elif not unchanged:
+                    review = {**review,"ok":False,"reason":"Модель подтвердила другой диапазон; текущие границы не прошли проверку."}
+            except PolicyError as exc:
+                review = {**review,"ok":False,"reason":str(exc)}
+        item["narrative"] = {"ok": bool(review["ok"]), "reason": str(review["reason"]),
+                             "start_sec": item["start"], "end_sec": item["end"], "prompt_version":"narrative-v2"}
+        if not review["ok"]:
+            item["decision"] = "skip"
+            item["rejection_reason"] = str(review["reason"])
+    return _resolve_publish_overlaps(candidates)
+
+
+def _resolve_publish_overlaps(candidates: list[dict]) -> list[dict]:
+    accepted: list[dict] = []
+    for item in candidates:
+        if item["decision"] != "publish":
+            continue
+        conflicts = [other for other in accepted if item["start"] < other["end"] and other["start"] < item["end"]]
+        if not conflicts:
+            accepted.append(item)
+            continue
+        score = item["pain"] + item["value"] + min(100, int((item["end"] - item["start"]) / 15))
+        conflict_scores = [other["pain"] + other["value"] + min(100, int((other["end"] - other["start"]) / 15)) for other in conflicts]
+        if score > max(conflict_scores):
+            for rejected in conflicts:
+                rejected["decision"] = "skip"
+                rejected["rejection_reason"] = "Кандидат пересекается с более полным эпизодом этой разметки."
+                rejected["narrative"] = {"ok": False, "reason": rejected["rejection_reason"]}
+                accepted.remove(rejected)
+            accepted.append(item)
+        else:
+            item["decision"] = "skip"
+            item["rejection_reason"] = "Кандидат пересекается с более полным эпизодом этой разметки."
+            item["narrative"] = {"ok": False, "reason": item["rejection_reason"]}
+    return candidates
 
 
 @app.task(name="worker.tasks.segment.run")
-def run(job_id: str) -> str:
-    publish_progress(job_id, Stage.SEGMENT, "running")
+def run(job_id: str, attempt_id: str | None = None) -> str:
+    publish_progress(job_id, Stage.SEGMENT, "running", attempt_id=attempt_id, detail="Ищем цельные эпизоды")
     with session_scope() as db:
-        db.get(Job, job_id).current_stage = Stage.SEGMENT
-        db.commit()
-
+        job = require_job_attempt(db, job_id, attempt_id)
+        attempt_id = str(job.attempt_id) if job.attempt_id else attempt_id
+        if (job.progress or {}).get("analysis_complete") and db.execute(select(Segment.id).where(Segment.job_id == job.id)).first():
+            return job_id
+        cues = json.loads(storage.download_bytes(job.transcript_snapshot["key"]).decode("utf-8"))
+        source = db.get(Source, job.source_id)
+        duration, topic, audience = analysis_duration(job, source), job.topic, job.audience
     try:
-        with session_scope() as db:
-            transcript_asset = db.execute(
-                select(Asset).where(
-                    Asset.job_id == job_id, Asset.kind == AssetKind.TRANSCRIPT
-                )
-            ).scalar_one()
-            video_asset = db.execute(
-                select(Asset).where(
-                    Asset.job_id == job_id, Asset.kind == AssetKind.SOURCE_VIDEO
-                )
-            ).scalar_one()
-            video_key = video_asset.s3_key
-            transcript_key = transcript_asset.s3_key
-
-        cues: list[dict] = json.loads(storage.download_bytes(transcript_key).decode("utf-8"))
-
-        tmp = Path(tempfile.mkdtemp(prefix=f"seg_{job_id}_"))
-        try:
-            mp4 = tmp / "source.mp4"
-            storage.download_file(video_key, mp4)
-            duration = ffmpeg.probe_duration(mp4)
-        finally:
-            shutil.rmtree(tmp, ignore_errors=True)
-
-        try:
-            raw = _llm_segment(cues, duration)
-            chapters = validate_chapters(
-                sorted(raw["chapters"], key=lambda c: float(c["start"])),
-                duration,
-            )
-            segments = validate_segments(
-                sorted(raw["segments"], key=lambda s: float(s["start"])),
-                duration,
-            )
-        except SegmentValidationError as first_err:
-            raw = _llm_segment(cues, duration, retry_hint=str(first_err))
-            chapters = validate_chapters(
-                sorted(raw["chapters"], key=lambda c: float(c["start"])),
-                duration,
-            )
-            segments = validate_segments(
-                sorted(raw["segments"], key=lambda s: float(s["start"])),
-                duration,
-            )
-
-        with session_scope() as db:
-            job = db.get(Job, job_id)
-            job.chapters = [
-                {"start_sec": float(c["start"]), "title": c["title"].strip()}
-                for c in chapters
-            ]
-            for idx, s in enumerate(segments):
-                db.add(Segment(
-                    job_id=job_id,
-                    index=idx,
-                    start_sec=float(s["start"]),
-                    end_sec=float(s["end"]),
-                    title=s["title"],
-                    summary=s["summary"],
-                    relevance=s["relevance"],
-                    pain=s["pain"],
-                    hook=s["hook"],
-                    value=s["value"],
-                    decision=SegmentDecision(s["decision"]),
-                    transcript_excerpt=_extract_excerpt(cues, s["start"], s["end"]),
-                ))
-            db.commit()
+        raw = _llm_segment(cues, duration, topic=topic, audience=audience)
+        chapters = _merge_chapters(raw["chapters"], duration)
+        candidates = _narrative_review(cues, _normalize_candidates(raw["segments"], duration), topic, audience, duration)
+        persist_analysis(job_id, attempt_id, chapters, candidates)
     except Exception as exc:
         with session_scope() as db:
-            job = db.get(Job, job_id)
-            job.status = JobStatus.FAILED
-            job.error = f"segment: {exc}"[:1000]
+            job = require_job_attempt(db, job_id, attempt_id)
+            job.status, job.error = JobStatus.FAILED, f"segment: {exc}"[:1000]
             db.commit()
-        publish_progress(job_id, Stage.SEGMENT, "failed")
+        publish_progress(job_id, Stage.SEGMENT, "failed", attempt_id=attempt_id, detail=str(exc)[:300])
         raise
-
-    publish_progress(job_id, Stage.SEGMENT, "done")
+    publish_progress(job_id, Stage.SEGMENT, "done", attempt_id=attempt_id, detail=f"Найдено эпизодов: {len(candidates)}")
     return job_id
 
 
-def _llm_segment(cues: list[dict], duration: float, retry_hint: str = "") -> dict:
-    """Строит главы и кандидатов, разбивая длинные видео на чанки ~2ч."""
+def persist_analysis(job_id: str, attempt_id: str | None, chapters: list[dict], candidates: list[dict]) -> str:
+    """Persist a trusted, completed Astra result under the current attempt fence.
+
+    This is intentionally an internal Python interface. It validates the same
+    single-range policy as a live model run, but never invokes the model itself.
+    """
+    with session_scope() as db:
+        job = require_job_attempt(db, job_id, attempt_id)
+        if (job.progress or {}).get("analysis_complete") and db.execute(
+            select(Segment.id).where(Segment.job_id == job.id)
+        ).first():
+            return job_id
+        source = db.get(Source, job.source_id)
+        duration = analysis_duration(job, source)
+        cues = json.loads(storage.download_bytes(job.transcript_snapshot["key"]).decode("utf-8"))
+
+        # A trusted result already passed window deduplication and narrative
+        # boundary review. Validate it without rewriting those reviewed choices.
+        chapters = validate_chapters(chapters, duration)
+        for index, item in enumerate(candidates):
+            try:
+                start, end = float(item["start"]), float(item["end"])
+            except (KeyError, TypeError, ValueError) as exc:
+                raise SegmentValidationError(f"segment {index} has invalid range") from exc
+            if start < 0 or end <= start or end > duration:
+                raise SegmentValidationError(f"segment {index} is outside the transcript timeline")
+            for score_name in _SCORE_NAMES:
+                score = item.get(score_name)
+                if isinstance(score, bool) or not isinstance(score, int) or not 0 <= score <= 100:
+                    raise SegmentValidationError(f"segment {index} {score_name} must be an integer from 0 to 100")
+            expected = decision_for_scores(item)
+            if item.get("decision") == "publish" and expected != "publish":
+                raise SegmentValidationError(f"segment {index} publish decision does not match scores")
+            narrative = item.get("narrative") or {}
+            if item.get("decision") == "publish" and narrative.get("ok") is not True:
+                raise SegmentValidationError(f"segment {index} has no approved narrative review")
+        publish_candidates = [candidate for candidate in candidates if candidate["decision"] == "publish"]
+        validate_segments(publish_candidates, duration)
+
+        deferred = not bool(source and source.original_key)
+        stages = ({"render": "not_requested", "verify": "not_requested", "thumbnail": "not_requested", "metadata": "not_requested"}
+                  if deferred else
+                  {"render": "pending", "verify": "pending", "thumbnail": "pending", "metadata": "pending"})
+        job.chapters = [{"start_sec": c["start"], "title": c["title"].strip()} for c in chapters]
+        for index, item in enumerate(candidates):
+            approved = item["decision"] == "publish" and item.get("narrative", {}).get("ok") is True
+            segment_obj = Segment(
+                job_id=job.id, index=index, start_sec=item["start"], end_sec=item["end"],
+                title=item["title"], summary=item["summary"], relevance=item["relevance"], pain=item["pain"],
+                hook=item["hook"], value=item["value"], decision=SegmentDecision(item["decision"]),
+                rejection_reason=item.get("rejection_reason"),
+                transcript_excerpt=_extract_text(cues, item["start"], item["end"], 1200),
+            )
+            db.add(segment_obj)
+            db.flush()
+            revision = SegmentRevision(
+                segment_id=segment_obj.id, number=1, start_sec=item["start"], end_sec=item["end"],
+                attempt_id=uuid.uuid4(), status="analyzed" if deferred and approved else ("rejected" if deferred else "queued"),
+                stages=dict(stages), validation={"narrative": item.get("narrative") or {"ok": False, "reason": item.get("rejection_reason") or "Кандидат отклонён."}},
+                transcript_text=_extract_text(cues, item["start"], item["end"]),
+            )
+            db.add(revision)
+            db.flush()
+            segment_obj.current_revision_id = revision.id
+        job.progress = {
+            **(job.progress or {}), "analysis_complete": True, "media_deferred": deferred,
+            "stage": Stage.SEGMENT.value, "status": "done",
+        }
+        db.commit()
+    return job_id
+
+
+def _llm_segment(cues: list[dict], duration: float, retry_hint: str = "", *, topic: str | None = None, audience: str | None = None) -> dict:
     chunks = _chunk_cues(cues, duration)
     raw: dict[str, list[dict]] = {"chapters": [], "segments": []}
-    for idx, (cs, ce, chunk_cues) in enumerate(chunks):
-        if not chunk_cues:
-            continue
-        chunk_text = _format_transcript(chunk_cues)
-        if len(chunks) == 1:
-            user = prompt.USER_TEMPLATE.format(
-                duration_sec=duration, transcript_lines=chunk_text
-            )
-        else:
-            user = (
-                f"Это часть {idx+1}/{len(chunks)} большого видео общей длительностью "
-                f"{duration:.0f} сек ({_fmt_ts(duration)}). Тебе дан КУСОК от "
-                f"{cs:.0f} ({_fmt_ts(cs)}) до {ce:.0f} ({_fmt_ts(ce)}), длина "
-                f"{ce - cs:.0f} сек. Составь chapters, которые описывают весь этот кусок. "
-                f"Ищи segments-кандидаты ТОЛЬКО внутри этого куска. "
-                f"Не заполняй кандидатами весь диапазон и не притягивай первого или последнего кандидата "
-                f"к границе куска. Используй РЕАЛЬНЫЕ таймкоды cue из транскрипта.\n\n"
-                f"{chunk_text}"
-            )
+    for index, (start, end, chunk) in enumerate(chunks):
+        user = (f"Окно {index + 1}/{len(chunks)} исходника {start:.3f}–{end:.3f} сек. Окна перекрываются на 25 минут; "
+                f"не обрывай тему по краю окна. Тема пользователя: {topic or 'не задана'}. Аудитория: {audience or 'не задана'}.\n\n"
+                + _format_transcript(chunk))
         if retry_hint:
-            user += f"\n\nПрошлый ответ не прошёл валидацию: {retry_hint}. Исправь."
-        data = llm.call_json(
-            system=prompt.SYSTEM, user=user,
-            schema=prompt.JSON_SCHEMA, schema_name="video_segments",
-            model=settings.codex_model,
-        )
+            user += f"\n\nИсправь ошибку прошлого ответа: {retry_hint}"
+        data = llm.call_json(system=prompt.SYSTEM, user=user, schema=prompt.JSON_SCHEMA, schema_name="video_segments", model=settings.codex_model)
         raw["chapters"].extend(data["chapters"])
         raw["segments"].extend(data["segments"])
     return raw
 
 
+def _merge_chapters(chapters: list[dict], duration: float) -> list[dict]:
+    result: list[dict] = []
+    for chapter in sorted(chapters, key=lambda row: float(row["start"])):
+        start = float(chapter["start"])
+        if 0 <= start <= duration and (not result or start - result[-1]["start"] >= 20):
+            result.append({"start": start, "title": str(chapter["title"])})
+    return validate_chapters(result, duration)
+
+
 def _format_transcript(cues: list[dict]) -> str:
-    lines = []
-    for c in cues:
-        ts = _fmt_ts(c["start"])
-        lines.append(f"[{ts}] {c['text']}")
-    return "\n".join(lines)
+    return "\n".join(f"[{float(cue['start']):.3f}–{float(cue['end']):.3f} | {_fmt_ts(cue['start'])}] {cue['text']}" for cue in cues)
 
 
 def _fmt_ts(sec: float) -> str:
-    m, s = divmod(int(sec), 60)
-    h, m = divmod(m, 60)
-    return f"{h:02d}:{m:02d}:{s:02d}"
+    minutes, seconds = divmod(int(sec), 60)
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+
+
+def _extract_text(cues: list[dict], start: float, end: float, max_chars: int | None = None) -> str:
+    text = " ".join(str(cue["text"]) for cue in cues if cue["end"] >= start and cue["start"] <= end)
+    return text[:max_chars] if max_chars else text
 
 
 def _extract_excerpt(cues: list[dict], start: float, end: float, max_chars: int = 500) -> str:
-    parts: list[str] = []
-    total = 0
-    for c in cues:
-        if c["end"] < start or c["start"] > end:
-            continue
-        parts.append(c["text"])
-        total += len(c["text"])
-        if total >= max_chars:
-            break
-    return " ".join(parts)[:max_chars]
+    return _extract_text(cues, start, end, max_chars)
+
+
+def ensure_revision_narrative(segment_id: str, revision_id: str, attempt_id: str) -> bool:
+    from worker.models import Job, SegmentRevision, Source
+    from worker.runtime import require_revision_attempt
+
+    with session_scope() as db:
+        segment, revision = require_revision_attempt(db, segment_id, revision_id, attempt_id)
+        job = db.get(Job, segment.job_id)
+        source = db.get(Source, job.source_id)
+        cues = json.loads(storage.download_bytes(job.transcript_snapshot["key"]).decode("utf-8"))
+        if revision.validation.get("narrative", {}).get("ok") and revision.transcript_text:
+            return True
+        duration = analysis_duration(job, source)
+        validate_interval(revision.start_sec, revision.end_sec, duration)
+        candidate = {
+            "start": revision.start_sec, "end": revision.end_sec, "title": segment.title or "",
+            "summary": segment.summary or "", "relevance": segment.relevance, "pain": segment.pain,
+            "hook": segment.hook, "value": segment.value, "decision": "publish", "rejection_reason": None,
+        }
+        topic, audience = job.topic, job.audience
+    reviewed = _narrative_review(cues, [candidate], topic, audience, duration, allow_adjustment=False)[0]
+    with session_scope() as db:
+        _, revision = require_revision_attempt(db, segment_id, revision_id, attempt_id)
+        narrative = reviewed["narrative"]
+        revision.validation = {**revision.validation, "narrative": narrative}
+        revision.transcript_text = _extract_text(cues, revision.start_sec, revision.end_sec)
+        if not narrative["ok"]:
+            revision.status = "failed"
+            revision.error = f"narrative: {narrative['reason']}"[:1000]
+        db.commit()
+    return bool(narrative["ok"])

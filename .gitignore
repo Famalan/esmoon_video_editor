@@ -10,4 +10,6 @@ auth.json
 .DS_Store
 .cursor/
 .next/
+.next-build/
 node_modules/
+*.tsbuildinfo

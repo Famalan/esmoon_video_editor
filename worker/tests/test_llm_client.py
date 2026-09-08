@@ -49,8 +49,8 @@ def test_call_json_runs_codex_with_schema_and_returns_parsed(monkeypatch):
     assert "--ignore-user-config" in captured["command"]
     assert "--ignore-rules" in captured["command"]
     assert "--output-schema" in captured["command"]
-    assert "gpt-5.6-luna" in captured["command"]
-    assert 'model_reasoning_effort="max"' in captured["command"]
+    assert "gpt-6-astra" in captured["command"]
+    assert 'model_reasoning_effort="medium"' in captured["command"]
     assert "sys" in captured["input"]
     assert "usr" in captured["input"]
     assert captured["timeout"] == 1800.0

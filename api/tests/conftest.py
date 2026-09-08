@@ -1,7 +1,7 @@
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy.orm import Session
 
 from app.celery_client import celery
 from app.db import Base, get_session
@@ -22,11 +22,12 @@ def engine():
 
 @pytest.fixture
 def db_session(engine):
-    SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
-    session = SessionLocal()
-    yield session
-    session.rollback()
-    session.close()
+    with engine.connect() as connection:
+        transaction = connection.begin()
+        session = Session(bind=connection, autoflush=False, join_transaction_mode="create_savepoint")
+        yield session
+        session.close()
+        transaction.rollback()
 
 
 @pytest.fixture(autouse=True)
@@ -36,6 +37,12 @@ def _stub_celery(monkeypatch):
 
 @pytest.fixture
 def client(db_session):
-    app.dependency_overrides[get_session] = lambda: db_session
+    def dependency():
+        try:
+            yield db_session
+        except BaseException:
+            db_session.rollback()
+            raise
+    app.dependency_overrides[get_session] = dependency
     yield TestClient(app)
     app.dependency_overrides.clear()

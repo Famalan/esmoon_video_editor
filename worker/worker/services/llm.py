@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from worker.config import settings
+from shared.policy import POLICY
 
 
 class LLMError(RuntimeError):
@@ -42,7 +43,8 @@ def call_json(
     # Параметры оставлены в интерфейсе, чтобы не ломать существующие вызовы.
     del temperature, max_tokens
 
-    selected_model = model or settings.codex_model
+    del model
+    selected_model = POLICY["model"]
     selected_timeout = timeout or settings.codex_timeout_sec
 
     with tempfile.TemporaryDirectory(prefix="esmoon-codex-") as tmp:
@@ -63,7 +65,7 @@ def call_json(
             "-m",
             selected_model,
             "-c",
-            f'model_reasoning_effort="{settings.codex_reasoning_effort}"',
+            f'model_reasoning_effort="{POLICY["reasoning"]}"',
             "--output-schema",
             str(schema_path),
             "-o",

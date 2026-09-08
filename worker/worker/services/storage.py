@@ -55,3 +55,28 @@ def download_bytes(key: str) -> bytes:
     c = _client()
     obj = c.get_object(Bucket=settings.minio_bucket, Key=key)
     return obj["Body"].read()
+
+
+def object_exists(key: str) -> bool:
+    try:
+        _client().head_object(Bucket=settings.minio_bucket, Key=key)
+        return True
+    except Exception as exc:
+        response = getattr(exc, "response", {})
+        code = str(response.get("Error", {}).get("Code", ""))
+        if code in {"404", "NoSuchKey", "NotFound"}:
+            return False
+        raise
+
+
+def copy_object(source_key: str, destination_key: str, content_type: str | None = None) -> None:
+    ensure_bucket()
+    args = {
+        "Bucket": settings.minio_bucket,
+        "Key": destination_key,
+        "CopySource": {"Bucket": settings.minio_bucket, "Key": source_key},
+        "MetadataDirective": "COPY",
+    }
+    if content_type:
+        args.update(ContentType=content_type, MetadataDirective="REPLACE")
+    _client().copy_object(**args)

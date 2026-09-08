@@ -1,130 +1,92 @@
-import { Chapter, listSegments, Segment } from "@/lib/api";
-
+"use client";
+import { Cue, Segment } from "@/lib/api";
 import { SegmentCard } from "./SegmentCard";
-
-function fmt(sec: number): string {
-  const s = Math.floor(sec);
-  const h = Math.floor(s / 3600);
-  const m = Math.floor((s % 3600) / 60);
-  const ss = s % 60;
-  if (h > 0) return `${h}:${String(m).padStart(2, "0")}:${String(ss).padStart(2, "0")}`;
-  return `${m}:${String(ss).padStart(2, "0")}`;
-}
-
-const scoreNames: Array<keyof Pick<Segment, "relevance" | "pain" | "hook" | "value">> = [
-  "relevance",
-  "pain",
-  "hook",
-  "value",
-];
-
-export async function SegmentList({
-  jobId,
-  chapters,
+export function SegmentList({
+  segments,
+  cues,
+  sourceDuration,
+  sourceUrl,
+  mediaDeferred,
+  onSeek,
+  onSegmentChange,
 }: {
-  jobId: string;
-  chapters: Chapter[];
+  segments: Segment[];
+  cues: Cue[];
+  sourceDuration: number | null;
+  sourceUrl: string | null;
+  mediaDeferred: boolean;
+  onSeek: (time: number) => void;
+  onSegmentChange: (segment: Segment) => void;
 }) {
-  const { items } = await listSegments(jobId);
-  const orderedItems = [...items].sort(
+  const ordered = [...segments].sort(
     (a, b) => a.index - b.index || a.start_sec - b.start_sec,
   );
-  const publishableItems = orderedItems.filter((segment) => segment.decision === "publish");
-
   return (
-    <div className="space-y-8">
-      <section className="space-y-4">
-        <div>
-          <h2 className="text-xl font-semibold">Таймкоды всего видео</h2>
-          <p className="mt-1 text-sm text-neutral-500">
-            Главы описывают исходное видео целиком и не зависят от отбора роликов.
+    <section className="space-y-4">
+      <div>
+        <p className="eyebrow">Кандидаты</p>
+        <h2 className="mt-1 text-xl font-semibold">Предложенные эпизоды</h2>
+        <p className="mt-2 max-w-3xl text-sm text-neutral-600">
+          {mediaDeferred
+            ? "Границы можно уточнить по соседним репликам. После сохранения модель повторно проверит цельность этого эпизода."
+            : "Границы можно уточнить только внутри исходника. После сохранения создаётся новая ревизия этого клипа, остальные файлы не меняются."}
+        </p>
+      </div>
+      {ordered.length === 0 ? (
+        <div className="panel-pad">
+          <p className="font-semibold">Кандидатов пока нет</p>
+          <p className="mt-1 text-sm text-neutral-600">
+            Они появятся здесь автоматически после смысловой разметки.
           </p>
         </div>
-
-        {chapters.length > 0 ? (
-          <ol className="max-h-[36rem] divide-y overflow-y-auto rounded border bg-white">
-            {chapters.map((chapter) => (
-              <li key={`${chapter.start_sec}-${chapter.title}`} className="flex gap-4 p-3">
-                <span className="w-20 shrink-0 font-mono text-sm text-neutral-500">
-                  {fmt(chapter.start_sec)}
-                </span>
-                <span className="font-medium text-neutral-900">{chapter.title}</span>
-              </li>
+      ) : (
+        <div className="space-y-5">
+          {ordered
+            .filter((segment) => segment.selected)
+            .map((segment) => (
+              <SegmentCard
+                key={segment.id}
+                segment={segment}
+                cues={cues}
+                sourceDuration={sourceDuration}
+                sourceUrl={sourceUrl}
+                mediaDeferred={mediaDeferred}
+                onSeek={onSeek}
+                onChange={onSegmentChange}
+              />
             ))}
-          </ol>
-        ) : (
-          <p className="rounded border border-dashed bg-neutral-50 p-4 text-sm text-neutral-600">
-            Для этой старой задачи главы ещё не сформированы.
-          </p>
-        )}
-      </section>
-
-      <section className="space-y-4">
-        <div>
-          <h2 className="text-xl font-semibold">Оценка найденных фрагментов</h2>
-          <p className="mt-1 text-sm text-neutral-500">
-            publish ставится при pain ≥ 70 и value ≥ 70. Границы определяются полнотой темы, а не заданной длительностью.
-          </p>
-        </div>
-
-        {orderedItems.length > 0 ? (
-          <ol className="divide-y rounded border bg-white">
-            {orderedItems.map((segment) => (
-              <li key={segment.id} className="space-y-2 p-4 sm:flex sm:items-start sm:justify-between sm:gap-4 sm:space-y-0">
-                <div className="min-w-0">
-                  <p className="font-mono text-sm text-neutral-500">
-                    {fmt(segment.start_sec)}–{fmt(segment.end_sec)}
-                  </p>
-                  <p className="mt-1 font-medium text-neutral-900">
-                    {segment.title ?? segment.yt_title ?? "Без названия"}
-                  </p>
-                  {segment.summary && (
-                    <p className="mt-2 max-w-3xl text-sm leading-6 text-neutral-600">
-                      {segment.summary}
-                    </p>
-                  )}
-                </div>
-
-                <div className="flex shrink-0 flex-wrap items-center gap-1.5 sm:max-w-md sm:justify-end">
-                  <span
-                    className={`rounded px-2 py-1 text-xs font-medium ${
-                      segment.decision === "publish"
-                        ? "bg-emerald-100 text-emerald-800"
-                        : "bg-neutral-100 text-neutral-600"
-                    }`}
-                  >
-                    {segment.decision}
-                  </span>
-                  {scoreNames.map((key) => (
-                    <span key={key} className="rounded bg-neutral-100 px-2 py-1 text-xs text-neutral-700">
-                      {key}: {segment[key]}
-                    </span>
+          {ordered.some((segment) => !segment.selected) && (
+            <details className="panel-pad">
+              <summary
+                id="excluded-candidates"
+                className="cursor-pointer font-semibold"
+              >
+                Исключённые кандидаты:{" "}
+                {ordered.filter((segment) => !segment.selected).length}
+              </summary>
+              <p className="mt-2 text-sm text-neutral-600">
+                Причины отказа, просмотр контекста и возврат в выборку.
+              </p>
+              <div className="mt-4 space-y-5">
+                {ordered
+                  .filter((segment) => !segment.selected)
+                  .map((segment) => (
+                    <SegmentCard
+                      key={segment.id}
+                      segment={segment}
+                      cues={cues}
+                      sourceDuration={sourceDuration}
+                      sourceUrl={sourceUrl}
+                      mediaDeferred={mediaDeferred}
+                      onSeek={onSeek}
+                      onChange={onSegmentChange}
+                    />
                   ))}
-                </div>
-              </li>
-            ))}
-          </ol>
-        ) : (
-          <p className="rounded border border-dashed bg-neutral-50 p-4 text-sm text-neutral-600">
-            Самостоятельных фрагментов для оценки не найдено.
-          </p>
-        )}
-      </section>
-
-      <section className="space-y-4">
-        <h2 className="text-xl font-semibold">Ролики к публикации</h2>
-        {publishableItems.length > 0 ? (
-          <div className="space-y-4">
-            {publishableItems.map((segment) => (
-              <SegmentCard key={segment.id} segment={segment} />
-            ))}
-          </div>
-        ) : (
-          <p className="rounded border border-dashed bg-neutral-50 p-4 text-sm text-neutral-600">
-            Нет роликов с решением publish. Все найденные фрагменты отмечены как skip.
-          </p>
-        )}
-      </section>
-    </div>
+              </div>
+            </details>
+          )}
+        </div>
+      )}
+    </section>
   );
 }
